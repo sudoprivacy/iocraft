@@ -154,10 +154,6 @@ impl TextBuffer {
         self.rows.len()
     }
 
-    fn text_len(&self) -> usize {
-        self.text.len()
-    }
-
     fn new<S: Into<String>>(text: S, width: usize) -> Self {
         let text = text.into();
         let s = SegmentedString::from(text.as_str());
@@ -283,7 +279,7 @@ struct TextBufferViewProps {
 struct TextBufferView {
     text_style: CanvasTextStyle,
     buffer: Arc<TextBuffer>,
-    prev_text_len: usize,
+    prev_measure_dims: (usize, usize),
 }
 
 impl Component for TextBufferView {
@@ -308,22 +304,19 @@ impl Component for TextBufferView {
         };
         self.buffer = props.buffer.clone();
         if props.auto_grow {
-            // Auto-grow: measure content dimensions for taffy layout.
-            // Only update when text changes to avoid mark_dirty loops.
-            let new_len = props.buffer.text_len();
-            if new_len != self.prev_text_len {
-                self.prev_text_len = new_len;
-                let buf = props.buffer.clone();
+            // Auto-grow: compute content dimensions and only call
+            // set_measure_func (which triggers mark_dirty) when they
+            // actually change. This prevents spurious dirty-marks that
+            // can keep the render loop spinning and block exit.
+            let max_w = props.buffer.lines().map(|l| l.width()).max().unwrap_or(1).max(1);
+            let row_count = props.buffer.row_count().max(1);
+            let dims = (max_w, row_count);
+            if dims != self.prev_measure_dims {
+                self.prev_measure_dims = dims;
                 updater.set_measure_func(Box::new(move |_known, _available, _style| {
-                    let mut max_w = 0usize;
-                    let mut lines = 0usize;
-                    for line in buf.lines() {
-                        max_w = max_w.max(line.width());
-                        lines += 1;
-                    }
                     taffy::Size {
-                        width: max_w.max(1) as f32,
-                        height: lines.max(1) as f32,
+                        width: max_w as f32,
+                        height: row_count as f32,
                     }
                 }));
             }
