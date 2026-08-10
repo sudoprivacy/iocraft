@@ -104,6 +104,11 @@ pub struct TextInputProps {
     /// If true, the input will fill 100% of the height of its container and handle multiline input.
     pub multiline: bool,
 
+    /// If true (requires `multiline`), the input auto-grows its height to
+    /// fit wrapped content instead of filling the container. Text wraps at
+    /// the component width and the height expands as needed.
+    pub auto_grow: bool,
+
     /// The color to make the cursor. Defaults to gray.
     pub cursor_color: Option<Color>,
 
@@ -369,6 +374,7 @@ impl Component for TextBufferView {
 #[component]
 pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyElement<'static>> {
     let multiline = props.multiline;
+    let auto_grow = props.auto_grow && multiline;
     let has_focus = props.has_focus;
     let wrap = if multiline {
         TextWrap::Wrap
@@ -584,8 +590,8 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
     });
 
     element! {
-        View(overflow: Overflow::Hidden, width: 100pct, height: if multiline { Size::Auto } else { Size::Length(1) }, position: Position::Relative) {
-            View(position: if multiline { Position::Relative } else { Position::Absolute }, top: if multiline { 0 } else { -(scroll_offset_row.get() as i32) }, left: if multiline { 0 } else { -(scroll_offset_col.get() as i32) }) {
+        View(overflow: Overflow::Hidden, width: 100pct, height: if auto_grow { Size::Auto } else if multiline { Size::Percent(100.0) } else { Size::Length(1) }, position: Position::Relative) {
+            View(position: if auto_grow { Position::Relative } else { Position::Absolute }, top: if auto_grow { 0 } else { -(scroll_offset_row.get() as i32) }, left: if auto_grow { 0 } else { -(scroll_offset_col.get() as i32) }) {
                 #(if has_focus {
                     Some(element! {
                         View(position: Position::Absolute, top: cursor_row, left: cursor_col, width: 1, height: 1, background_color: props.cursor_color.unwrap_or(Color::Grey))
