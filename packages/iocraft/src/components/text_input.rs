@@ -2,7 +2,7 @@ use crate::{
     component,
     components::{TextDecoration, TextDrawer, TextWrap, View},
     element,
-    hooks::{Ref, State, UseMemo, UseState, UseTerminalEvents},
+    hooks::{Ref, State, UseMemo, UseState, UseTerminalEvents, UseTerminalSize},
     segmented_string::SegmentedString,
     AnyElement, CanvasTextStyle, Color, Component, ComponentDrawer, ComponentUpdater, HandlerMut,
     Hook, Hooks, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, LayoutStyle, Overflow, Position,
@@ -146,6 +146,10 @@ struct TextBuffer {
 }
 
 impl TextBuffer {
+    fn row_count(&self) -> usize {
+        self.rows.len()
+    }
+
     fn new<S: Into<String>>(text: S, width: usize) -> Self {
         let text = text.into();
         let s = SegmentedString::from(text.as_str());
@@ -362,7 +366,15 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
     let mut scroll_offset_row = hooks.use_state(|| 0u16);
     let mut scroll_offset_col = hooks.use_state(|| 0u16);
     let mut vertical_movement_col_preference = hooks.use_state(|| None);
-    let (width, height) = hooks.use_size();
+    let (mut width, height) = hooks.use_size();
+    let (term_width, _) = hooks.use_terminal_size();
+
+    // On the first render, use_size() returns 0. Use terminal width as
+    // a fallback so the TextBuffer is created with the correct wrap width
+    // immediately, avoiding a flash of unwrapped content.
+    if width == 0 && term_width > 0 {
+        width = term_width;
+    }
 
     if let Some(handle_ref) = props.handle.as_mut() {
         handle_ref.set(TextInputHandle {
@@ -426,7 +438,10 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
         } else if cursor_row < scroll_offset_row.get() {
             scroll_offset_row.set(cursor_row as _);
         }
-        if cursor_col >= scroll_offset_col.get() + width {
+        if wrap == TextWrap::Wrap {
+            // When wrapping, text never extends beyond the visible width.
+            scroll_offset_col.set(0);
+        } else if cursor_col >= scroll_offset_col.get() + width {
             scroll_offset_col.set(cursor_col - width + 1);
         } else if cursor_col < scroll_offset_col.get() {
             scroll_offset_col.set(cursor_col as _);
@@ -560,7 +575,10 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
     });
 
     element! {
-        View(overflow: Overflow::Hidden, width: 100pct, height: if multiline { Size::Percent(100.0) } else { Size::Length(1) }, position: Position::Relative) {
+        View(overflow: Overflow::Hidden, width: 100pct, height: if multiline {
+            // Calculate content height from buffer rows. Add 1 for cursor line.
+            Size::Length(buffer.row_count().max(1) as u32)
+        } else { Size::Length(1) }, position: Position::Relative) {
             View(position: Position::Absolute, top: -(scroll_offset_row.get() as i32), left: -(scroll_offset_col.get() as i32)) {
                 #(if has_focus {
                     Some(element! {
