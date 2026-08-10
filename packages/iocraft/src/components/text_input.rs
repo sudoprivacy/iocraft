@@ -271,6 +271,7 @@ impl TextBuffer {
 
 #[derive(Default, Props)]
 struct TextBufferViewProps {
+    auto_grow: bool,
     color: Option<Color>,
     weight: Weight,
     underline: bool,
@@ -283,7 +284,6 @@ struct TextBufferViewProps {
 struct TextBufferView {
     text_style: CanvasTextStyle,
     buffer: Arc<TextBuffer>,
-    prev_text_len: usize,
 }
 
 impl Component for TextBufferView {
@@ -307,26 +307,32 @@ impl Component for TextBufferView {
             invert: props.invert,
         };
         self.buffer = props.buffer.clone();
-        // Only update the measure function when text content actually
-        // changes — set_measure_func calls mark_dirty which triggers
-        // re-render. Without this guard, every render would mark dirty
-        // again, creating an infinite loop.
-        let text_len = props.buffer.text_len();
-        if text_len != self.prev_text_len {
-            self.prev_text_len = text_len;
-            let buf_clone = props.buffer.clone();
+        if props.auto_grow {
+            // In auto_grow mode, provide a measure function so taffy
+            // computes height from wrapped content during layout.
+            let buf = props.buffer.clone();
             updater.set_measure_func(Box::new(move |_known, _available, _style| {
-            let mut max_width = 0usize;
-            let mut num_lines = 0usize;
-            for line in buf_clone.lines() {
-                max_width = max_width.max(line.width());
-                num_lines += 1;
-            }
-            taffy::Size {
-                width: max_width.max(1) as f32,
-                height: num_lines.max(1) as f32,
-            }
-        }));
+                let mut max_width = 0usize;
+                let mut num_lines = 0usize;
+                for line in buf.lines() {
+                    max_width = max_width.max(line.width());
+                    num_lines += 1;
+                }
+                taffy::Size {
+                    width: max_width.max(1) as f32,
+                    height: num_lines.max(1) as f32,
+                }
+            }));
+        } else {
+            updater.set_layout_style(
+                LayoutStyle {
+                    position: Position::Absolute,
+                    top: 0.into(),
+                    left: 0.into(),
+                    ..Default::default()
+                }
+                .into(),
+            );
         }
     }
 
@@ -600,6 +606,7 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
                     None
                 })
                 TextBufferView(
+                    auto_grow,
                     buffer,
                     color: props.color,
                     weight: props.weight,
