@@ -279,7 +279,7 @@ struct TextBufferViewProps {
 struct TextBufferView {
     text_style: CanvasTextStyle,
     buffer: Arc<TextBuffer>,
-    prev_measure_dims: (usize, usize),
+    prev_row_count: usize,
 }
 
 impl Component for TextBufferView {
@@ -304,21 +304,20 @@ impl Component for TextBufferView {
         };
         self.buffer = props.buffer.clone();
         if props.auto_grow {
-            // Auto-grow: compute content dimensions and only call
-            // set_measure_func (which triggers mark_dirty) when they
-            // actually change. This prevents spurious dirty-marks that
-            // can keep the render loop spinning and block exit.
-            let max_w = props.buffer.lines().map(|l| l.width()).max().unwrap_or(1).max(1);
+            // Auto-grow: use explicit height (row count) and full
+            // parent width. Avoids set_measure_func entirely — no
+            // mark_dirty, no render-loop interactions.
             let row_count = props.buffer.row_count().max(1);
-            let dims = (max_w, row_count);
-            if dims != self.prev_measure_dims {
-                self.prev_measure_dims = dims;
-                updater.set_measure_func(Box::new(move |_known, _available, _style| {
-                    taffy::Size {
-                        width: max_w as f32,
-                        height: row_count as f32,
+            if row_count != self.prev_row_count {
+                self.prev_row_count = row_count;
+                updater.set_layout_style(
+                    LayoutStyle {
+                        width: Size::Percent(100.0),
+                        height: Size::Length(row_count as u32),
+                        ..Default::default()
                     }
-                }));
+                    .into(),
+                );
             }
         } else {
             updater.set_layout_style(
