@@ -104,11 +104,6 @@ pub struct TextInputProps {
     /// If true, the input will fill 100% of the height of its container and handle multiline input.
     pub multiline: bool,
 
-    /// If true (requires `multiline`), the input auto-grows its height to
-    /// fit wrapped content instead of filling the container. Text wraps at
-    /// the component width and the height expands as needed.
-    pub auto_grow: bool,
-
     /// The color to make the cursor. Defaults to gray.
     pub cursor_color: Option<Color>,
 
@@ -151,14 +146,6 @@ struct TextBuffer {
 }
 
 impl TextBuffer {
-    fn row_count(&self) -> usize {
-        self.rows.len()
-    }
-
-    fn text_len(&self) -> usize {
-        self.text.len()
-    }
-
     fn new<S: Into<String>>(text: S, width: usize) -> Self {
         let text = text.into();
         let s = SegmentedString::from(text.as_str());
@@ -271,7 +258,6 @@ impl TextBuffer {
 
 #[derive(Default, Props)]
 struct TextBufferViewProps {
-    auto_grow: bool,
     color: Option<Color>,
     weight: Weight,
     underline: bool,
@@ -307,33 +293,15 @@ impl Component for TextBufferView {
             invert: props.invert,
         };
         self.buffer = props.buffer.clone();
-        if props.auto_grow {
-            // In auto_grow mode, provide a measure function so taffy
-            // computes height from wrapped content during layout.
-            let buf = props.buffer.clone();
-            updater.set_measure_func(Box::new(move |_known, _available, _style| {
-                let mut max_width = 0usize;
-                let mut num_lines = 0usize;
-                for line in buf.lines() {
-                    max_width = max_width.max(line.width());
-                    num_lines += 1;
-                }
-                taffy::Size {
-                    width: max_width.max(1) as f32,
-                    height: num_lines.max(1) as f32,
-                }
-            }));
-        } else {
-            updater.set_layout_style(
-                LayoutStyle {
-                    position: Position::Absolute,
-                    top: 0.into(),
-                    left: 0.into(),
-                    ..Default::default()
-                }
-                .into(),
-            );
-        }
+        updater.set_layout_style(
+            LayoutStyle {
+                position: Position::Absolute,
+                top: 0.into(),
+                left: 0.into(),
+                ..Default::default()
+            }
+            .into(),
+        );
     }
 
     fn draw(&mut self, drawer: &mut ComponentDrawer<'_>) {
@@ -380,7 +348,6 @@ impl Component for TextBufferView {
 #[component]
 pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyElement<'static>> {
     let multiline = props.multiline;
-    let auto_grow = props.auto_grow && multiline;
     let has_focus = props.has_focus;
     let wrap = if multiline {
         TextWrap::Wrap
@@ -459,10 +426,7 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
         } else if cursor_row < scroll_offset_row.get() {
             scroll_offset_row.set(cursor_row as _);
         }
-        if wrap == TextWrap::Wrap {
-            // When wrapping, text never extends beyond the visible width.
-            scroll_offset_col.set(0);
-        } else if cursor_col >= scroll_offset_col.get() + width {
+        if cursor_col >= scroll_offset_col.get() + width {
             scroll_offset_col.set(cursor_col - width + 1);
         } else if cursor_col < scroll_offset_col.get() {
             scroll_offset_col.set(cursor_col as _);
@@ -596,8 +560,8 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
     });
 
     element! {
-        View(overflow: Overflow::Hidden, width: 100pct, height: if auto_grow { Size::Auto } else if multiline { Size::Percent(100.0) } else { Size::Length(1) }, position: Position::Relative) {
-            View(position: if auto_grow { Position::Relative } else { Position::Absolute }, top: if auto_grow { 0 } else { -(scroll_offset_row.get() as i32) }, left: if auto_grow { 0 } else { -(scroll_offset_col.get() as i32) }) {
+        View(overflow: Overflow::Hidden, width: 100pct, height: if multiline { Size::Percent(100.0) } else { Size::Length(1) }, position: Position::Relative) {
+            View(position: Position::Absolute, top: -(scroll_offset_row.get() as i32), left: -(scroll_offset_col.get() as i32)) {
                 #(if has_focus {
                     Some(element! {
                         View(position: Position::Absolute, top: cursor_row, left: cursor_col, width: 1, height: 1, background_color: props.cursor_color.unwrap_or(Color::Grey))
@@ -606,7 +570,6 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
                     None
                 })
                 TextBufferView(
-                    auto_grow,
                     buffer,
                     color: props.color,
                     weight: props.weight,
