@@ -64,3 +64,5 @@ mod use_terminal_size;
 pub use use_terminal_size::*;
 mod use_component_rect;
 pub use use_component_rect::*;
+pub(crate) mod use_measure;
+pub(crate) use use_measure::*;

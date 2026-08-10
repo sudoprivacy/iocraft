@@ -2,7 +2,7 @@ use crate::{
     component,
     components::{TextDecoration, TextDrawer, TextWrap, View},
     element,
-    hooks::{Ref, State, UseMemo, UseState, UseTerminalEvents, UseTerminalSize},
+    hooks::{Ref, State, UseMeasure, UseMemo, UseState, UseTerminalEvents},
     segmented_string::SegmentedString,
     AnyElement, CanvasTextStyle, Color, Component, ComponentDrawer, ComponentUpdater, HandlerMut,
     Hook, Hooks, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, LayoutStyle, Overflow, Position,
@@ -297,15 +297,21 @@ impl Component for TextBufferView {
             invert: props.invert,
         };
         self.buffer = props.buffer.clone();
-        updater.set_layout_style(
-            LayoutStyle {
-                position: Position::Absolute,
-                top: 0.into(),
-                left: 0.into(),
-                ..Default::default()
+        // Use a measure function to communicate content dimensions to taffy.
+        // This ensures the parent View auto-sizes to fit wrapped content.
+        let buf_clone = props.buffer.clone();
+        updater.set_measure_func(Box::new(move |_known, _available, _style| {
+            let mut max_width = 0usize;
+            let mut num_lines = 0usize;
+            for line in buf_clone.lines() {
+                max_width = max_width.max(line.width());
+                num_lines += 1;
             }
-            .into(),
-        );
+            taffy::Size {
+                width: max_width.max(1) as f32,
+                height: num_lines.max(1) as f32,
+            }
+        }));
     }
 
     fn draw(&mut self, drawer: &mut ComponentDrawer<'_>) {
@@ -366,14 +372,28 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
     let mut scroll_offset_row = hooks.use_state(|| 0u16);
     let mut scroll_offset_col = hooks.use_state(|| 0u16);
     let mut vertical_movement_col_preference = hooks.use_state(|| None);
-    let (mut width, height) = hooks.use_size();
-    let (term_width, _) = hooks.use_terminal_size();
+    let (width, height) = hooks.use_size();
 
-    // On the first render, use_size() returns 0. Use terminal width as
-    // a fallback so the TextBuffer is created with the correct wrap width
-    // immediately, avoiding a flash of unwrapped content.
-    if width == 0 && term_width > 0 {
-        width = term_width;
+    // When multiline, set a measure function so taffy computes height
+    // from wrapped content during layout — avoiding the stale-size
+    // circular dependency that use_size() creates.
+    if multiline {
+        let text_for_measure = props.value.clone();
+        hooks.use_measure_func(Box::new(move |known_dims, available_space, _style| {
+            use taffy::AvailableSpace;
+            let w = known_dims.width.unwrap_or(match available_space.width {
+                AvailableSpace::Definite(w) => w,
+                _ => 80.0,
+            });
+            let wrap_width = (w as usize).max(1).saturating_sub(1); // -1 for cursor
+            let s = SegmentedString::from(text_for_measure.as_str());
+            let lines = s.wrap(wrap_width);
+            let row_count = lines.len().max(1);
+            taffy::Size {
+                width: w,
+                height: row_count as f32,
+            }
+        }));
     }
 
     if let Some(handle_ref) = props.handle.as_mut() {
@@ -575,11 +595,8 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
     });
 
     element! {
-        View(overflow: Overflow::Hidden, width: 100pct, height: if multiline {
-            // Calculate content height from buffer rows. Add 1 for cursor line.
-            Size::Length(buffer.row_count().max(1) as u32)
-        } else { Size::Length(1) }, position: Position::Relative) {
-            View(position: Position::Absolute, top: -(scroll_offset_row.get() as i32), left: -(scroll_offset_col.get() as i32)) {
+        View(overflow: Overflow::Hidden, width: 100pct, height: if multiline { Size::Auto } else { Size::Length(1) }, position: Position::Relative) {
+            View(position: if multiline { Position::Relative } else { Position::Absolute }, top: if multiline { 0 } else { -(scroll_offset_row.get() as i32) }, left: if multiline { 0 } else { -(scroll_offset_col.get() as i32) }) {
                 #(if has_focus {
                     Some(element! {
                         View(position: Position::Absolute, top: cursor_row, left: cursor_col, width: 1, height: 1, background_color: props.cursor_color.unwrap_or(Color::Grey))
