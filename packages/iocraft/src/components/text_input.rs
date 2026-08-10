@@ -150,6 +150,10 @@ impl TextBuffer {
         self.rows.len()
     }
 
+    fn text_len(&self) -> usize {
+        self.text.len()
+    }
+
     fn new<S: Into<String>>(text: S, width: usize) -> Self {
         let text = text.into();
         let s = SegmentedString::from(text.as_str());
@@ -274,6 +278,7 @@ struct TextBufferViewProps {
 struct TextBufferView {
     text_style: CanvasTextStyle,
     buffer: Arc<TextBuffer>,
+    prev_text_len: usize,
 }
 
 impl Component for TextBufferView {
@@ -297,10 +302,15 @@ impl Component for TextBufferView {
             invert: props.invert,
         };
         self.buffer = props.buffer.clone();
-        // Use a measure function to communicate content dimensions to taffy.
-        // This ensures the parent View auto-sizes to fit wrapped content.
-        let buf_clone = props.buffer.clone();
-        updater.set_measure_func(Box::new(move |_known, _available, _style| {
+        // Only update the measure function when text content actually
+        // changes — set_measure_func calls mark_dirty which triggers
+        // re-render. Without this guard, every render would mark dirty
+        // again, creating an infinite loop.
+        let text_len = props.buffer.text_len();
+        if text_len != self.prev_text_len {
+            self.prev_text_len = text_len;
+            let buf_clone = props.buffer.clone();
+            updater.set_measure_func(Box::new(move |_known, _available, _style| {
             let mut max_width = 0usize;
             let mut num_lines = 0usize;
             for line in buf_clone.lines() {
@@ -312,6 +322,7 @@ impl Component for TextBufferView {
                 height: num_lines.max(1) as f32,
             }
         }));
+        }
     }
 
     fn draw(&mut self, drawer: &mut ComponentDrawer<'_>) {
