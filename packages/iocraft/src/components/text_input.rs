@@ -2,7 +2,7 @@ use crate::{
     component,
     components::{TextDecoration, TextDrawer, TextWrap, View},
     element,
-    hooks::{Ref, State, UseMeasure, UseMemo, UseState, UseTerminalEvents},
+    hooks::{Ref, State, UseMemo, UseState, UseTerminalEvents},
     segmented_string::SegmentedString,
     AnyElement, CanvasTextStyle, Color, Component, ComponentDrawer, ComponentUpdater, HandlerMut,
     Hook, Hooks, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, LayoutStyle, Overflow, Position,
@@ -373,28 +373,6 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
     let mut scroll_offset_col = hooks.use_state(|| 0u16);
     let mut vertical_movement_col_preference = hooks.use_state(|| None);
     let (width, height) = hooks.use_size();
-
-    // When multiline, set a measure function so taffy computes height
-    // from wrapped content during layout — avoiding the stale-size
-    // circular dependency that use_size() creates.
-    if multiline {
-        let text_for_measure = props.value.clone();
-        hooks.use_measure_func(Box::new(move |known_dims, available_space, _style| {
-            use taffy::AvailableSpace;
-            let w = known_dims.width.unwrap_or(match available_space.width {
-                AvailableSpace::Definite(w) => w,
-                _ => 80.0,
-            });
-            let wrap_width = (w as usize).max(1).saturating_sub(1); // -1 for cursor
-            let s = SegmentedString::from(text_for_measure.as_str());
-            let lines = s.wrap(wrap_width);
-            let row_count = lines.len().max(1);
-            taffy::Size {
-                width: w,
-                height: row_count as f32,
-            }
-        }));
-    }
 
     if let Some(handle_ref) = props.handle.as_mut() {
         handle_ref.set(TextInputHandle {
