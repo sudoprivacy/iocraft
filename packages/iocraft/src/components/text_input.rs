@@ -429,7 +429,9 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
             cursor_offset.set(new_cursor_offset);
         }
         prev_value.set(props.value.clone());
-        new_cursor_offset_hint.set(NewCursorOffsetHint::None);
+        if new_cursor_offset_hint.get() != NewCursorOffsetHint::None {
+            new_cursor_offset_hint.set(NewCursorOffsetHint::None);
+        }
     }
 
     // Update the cursor position if the user requested it.
@@ -456,7 +458,9 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
             scroll_offset_row.set(cursor_row as _);
         }
         if auto_grow {
-            scroll_offset_col.set(0);
+            if scroll_offset_col.get() != 0 {
+                scroll_offset_col.set(0);
+            }
         } else if cursor_col >= scroll_offset_col.get() + width {
             scroll_offset_col.set(cursor_col - width + 1);
         } else if cursor_col < scroll_offset_col.get() {
