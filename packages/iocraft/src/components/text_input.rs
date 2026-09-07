@@ -590,6 +590,17 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
                     }
                 }
                 _ => {}
+                // Bracketed paste: the whole pasted block arrives as one
+                // TerminalEvent::Paste, including any newlines. Insert every
+                // character as a literal — newlines are NOT a submit signal.
+                // The submit decision belongs to the outer REPL key handler.
+                TerminalEvent::Paste(text) => {
+                    for c in text.chars() {
+                        value.insert(temp_cursor_offset, c);
+                        temp_cursor_offset += c.len_utf8();
+                    }
+                    on_change(value.clone());
+                }
             }
         }
     });
