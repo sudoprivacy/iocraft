@@ -101,6 +101,15 @@ pub struct TextInputProps {
     /// The handler to invoke when the value changes.
     pub on_change: HandlerMut<'static, String>,
 
+    /// Optional handler for bracketed-paste events.
+    ///
+    /// When provided, the component forwards the raw pasted string to this
+    /// callback instead of inserting it character-by-character into the
+    /// buffer.  The caller is responsible for updating `value` (and for any
+    /// placeholder substitution).  When `None`, the default behaviour applies:
+    /// pasted text is inserted literally at the cursor (newlines become `\n`).
+    pub on_paste: HandlerMut<'static, String>,
+
     /// If true, the input will fill 100% of the height of its container and handle multiline input.
     pub multiline: bool,
 
@@ -480,6 +489,7 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
         let mut value = props.value.clone();
         let mut temp_cursor_offset = cursor_offset.get();
         let mut on_change = props.on_change.take();
+        let mut on_paste = props.on_paste.take();
         move |event| {
             if !has_focus {
                 return;
@@ -590,6 +600,22 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
                     }
                 }
                 _ => {}
+                // Bracketed paste: the whole pasted block arrives as one
+                // TerminalEvent::Paste, including any newlines.
+                TerminalEvent::Paste(text) => {
+                    if !on_paste.is_default() {
+                        // Caller handles paste (e.g. REPL placeholder logic).
+                        on_paste(text);
+                    } else {
+                        // Default: insert pasted text literally at cursor.
+                        // Newlines are \n — NOT submit signals.
+                        for c in text.chars() {
+                            value.insert(temp_cursor_offset, c);
+                            temp_cursor_offset += c.len_utf8();
+                        }
+                        on_change(value.clone());
+                    }
+                }
             }
         }
     });
