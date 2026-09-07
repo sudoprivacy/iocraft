@@ -85,6 +85,12 @@ pub enum TerminalEvent {
     FullscreenMouse(FullscreenMouseEvent),
     /// A resize event, fired when the terminal is resized.
     Resize(u16, u16),
+    /// A paste event, fired when text is pasted via bracketed paste mode.
+    ///
+    /// The string contains the full pasted content, including any newlines.
+    /// Consumers should treat newlines as literal characters, not as submit
+    /// signals — this is the whole point of bracketed paste.
+    Paste(String),
 }
 
 struct TerminalEventsInner {
@@ -380,6 +386,7 @@ impl TerminalImpl for StdTerminal<'_> {
                     Ok(Event::Resize(width, height)) => {
                         Some(Ok(TerminalEvent::Resize(width, height)))
                     }
+                    Ok(Event::Paste(text)) => Some(Ok(TerminalEvent::Paste(text))),
                     // Ignore crossterm events that iocraft does not expose.
                     Ok(_) => None,
                     Err(error) => Some(Err(error)),
@@ -443,9 +450,11 @@ impl<'a> StdTerminal<'a> {
                 if self.mouse_capture {
                     self.dest.execute(event::EnableMouseCapture)?;
                 }
+                self.dest.execute(event::EnableBracketedPaste)?;
                 terminal::enable_raw_mode()?;
             } else {
                 terminal::disable_raw_mode()?;
+                self.dest.execute(event::DisableBracketedPaste)?;
                 if self.mouse_capture {
                     self.dest.execute(event::DisableMouseCapture)?;
                 }
