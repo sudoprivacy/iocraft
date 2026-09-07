@@ -599,7 +599,6 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
                         vertical_movement_col_preference.set(None);
                     }
                 }
-                _ => {}
                 // Bracketed paste: the whole pasted block arrives as one
                 // TerminalEvent::Paste, including any newlines.
                 TerminalEvent::Paste(text) => {
@@ -616,6 +615,7 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
                         on_change(value.clone());
                     }
                 }
+                _ => {}
             }
         }
     });

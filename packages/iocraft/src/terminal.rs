@@ -450,11 +450,15 @@ impl<'a> StdTerminal<'a> {
                 if self.mouse_capture {
                     self.dest.execute(event::EnableMouseCapture)?;
                 }
-                self.dest.execute(event::EnableBracketedPaste)?;
+                // Best-effort: silently ignore Unsupported on platforms
+                // where bracketed paste is not supported (e.g. Windows
+                // legacy Console API). On macOS/Linux this enables
+                // ESC[?2004h and paste events work correctly.
+                let _ = self.dest.execute(event::EnableBracketedPaste);
                 terminal::enable_raw_mode()?;
             } else {
                 terminal::disable_raw_mode()?;
-                self.dest.execute(event::DisableBracketedPaste)?;
+                let _ = self.dest.execute(event::DisableBracketedPaste);
                 if self.mouse_capture {
                     self.dest.execute(event::DisableMouseCapture)?;
                 }
