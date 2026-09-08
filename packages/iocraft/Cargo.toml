@@ -11,7 +11,7 @@ default = []
 unstable-output-streams = []
 
 [dependencies]
-crossterm = { version = "0.29.0", features = ["event-stream", "bracketed-paste"] }
+crossterm = { git = "https://github.com/sudoprivacy/crossterm.git", branch = "feat/windows-vt-bracketed-paste", features = ["event-stream", "bracketed-paste"] }
 futures = "0.3.30"
 taffy = { version = "0.5.2", default-features = false, features = ["std", "flexbox", "taffy_tree"] }
 iocraft-macros = { version = "0.2.4", path = "../iocraft-macros" }
