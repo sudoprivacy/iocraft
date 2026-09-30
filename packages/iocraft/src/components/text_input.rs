@@ -305,6 +305,8 @@ impl Component for TextBufferView {
         updater: &mut ComponentUpdater,
     ) {
         self.text_style = CanvasTextStyle {
+            dim: false,
+            strikethrough: false,
             color: props.color,
             weight: props.weight,
             underline: props.underline,
