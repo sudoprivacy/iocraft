@@ -64,6 +64,13 @@ pub struct CanvasTextStyle {
     /// The weight of the text.
     pub weight: Weight,
 
+    /// Whether the text is dim, independently of its weight. `Weight::Light`
+    /// also enables dim text for backwards compatibility.
+    pub dim: bool,
+
+    /// Whether the text has a strikethrough decoration.
+    pub strikethrough: bool,
+
     /// Whether the text is underlined.
     pub underline: bool,
 
@@ -72,6 +79,12 @@ pub struct CanvasTextStyle {
 
     /// Whether the foreground and background colors should be inverted.
     pub invert: bool,
+}
+
+impl CanvasTextStyle {
+    fn is_dim(self) -> bool {
+        self.dim || self.weight == Weight::Light
+    }
 }
 
 /// A single cell on a [`Canvas`], containing optional text and background color.
@@ -293,7 +306,14 @@ impl Canvas {
             if ansi {
                 let mut needs_reset = false;
                 if let Some(c) = &cell.character {
-                    if c.style.weight != text_style.weight && c.style.weight == Weight::Normal {
+                    // SGR bold and dim are independent. Enabling one does not
+                    // turn the other off, so reset when either is removed.
+                    if (text_style.weight == Weight::Bold && c.style.weight != Weight::Bold)
+                        || (text_style.is_dim() && !c.style.is_dim())
+                    {
+                        needs_reset = true;
+                    }
+                    if !c.style.strikethrough && text_style.strikethrough {
                         needs_reset = true;
                     }
                     if !c.style.underline && text_style.underline {
@@ -305,7 +325,7 @@ impl Canvas {
                     if !c.style.invert && text_style.invert {
                         needs_reset = true;
                     }
-                } else if text_style.underline || text_style.invert {
+                } else if text_style.underline || text_style.invert || text_style.strikethrough {
                     needs_reset = true;
                 }
                 if needs_reset {
@@ -323,12 +343,16 @@ impl Canvas {
                         )?;
                     }
 
-                    if c.style.weight != text_style.weight {
-                        match c.style.weight {
-                            Weight::Bold => write!(w, csi!("{}m"), Attribute::Bold.sgr())?,
-                            Weight::Normal => {}
-                            Weight::Light => write!(w, csi!("{}m"), Attribute::Dim.sgr())?,
-                        }
+                    if c.style.weight == Weight::Bold && text_style.weight != Weight::Bold {
+                        write!(w, csi!("{}m"), Attribute::Bold.sgr())?;
+                    }
+
+                    if c.style.is_dim() && !text_style.is_dim() {
+                        write!(w, csi!("{}m"), Attribute::Dim.sgr())?;
+                    }
+
+                    if c.style.strikethrough && !text_style.strikethrough {
+                        write!(w, csi!("{}m"), Attribute::CrossedOut.sgr())?;
                     }
 
                     if c.style.underline && !text_style.underline {
@@ -599,8 +623,7 @@ impl CanvasSubviewMut<'_> {
         let horizontal_space = max_x - x + 1;
         let min_y = self.clip_y.max(0);
         let max_y = (self.clip_y + self.clip_height as isize).min(self.canvas.height() as _) - 1;
-        let mut y = self.y + y;
-        for line in text.lines() {
+        for (y, line) in (self.y + y..).zip(text.lines()) {
             if y >= min_y && y <= max_y {
                 let mut skipped_width = 0;
                 let mut taken_width = 0;
@@ -627,7 +650,6 @@ impl CanvasSubviewMut<'_> {
                     style,
                 );
             }
-            y += 1;
         }
     }
 }
@@ -910,6 +932,9 @@ mod tests {
         write!(expected, csi!("{}m"), Attribute::Bold.sgr()).unwrap();
         write!(expected, ".").unwrap();
 
+        // Bold must be disabled before entering dim-only text.
+        write!(expected, csi!("0m")).unwrap();
+        write!(expected, csi!("{}m"), Colored::ForegroundColor(Color::Red)).unwrap();
         write!(expected, csi!("{}m"), Attribute::Dim.sgr()).unwrap();
         write!(expected, ".").unwrap();
 

@@ -18,6 +18,12 @@ pub struct MixedTextContent {
     /// The weight of the text.
     pub weight: Weight,
 
+    /// Whether to dim the text, independently of its weight.
+    pub dim: bool,
+
+    /// Whether to draw a strikethrough through the text.
+    pub strikethrough: bool,
+
     /// The text decoration.
     pub decoration: TextDecoration,
 
@@ -49,6 +55,18 @@ impl MixedTextContent {
     /// Returns a new [`MixedTextContent`] with the given weight.
     pub fn weight(mut self, weight: Weight) -> Self {
         self.weight = weight;
+        self
+    }
+
+    /// Returns a new [`MixedTextContent`] with dim text, preserving its weight.
+    pub fn dim(mut self) -> Self {
+        self.dim = true;
+        self
+    }
+
+    /// Returns a new [`MixedTextContent`] with strikethrough text.
+    pub fn strikethrough(mut self) -> Self {
+        self.strikethrough = true;
         self
     }
 
@@ -187,6 +205,8 @@ impl Component for MixedText {
                 let style = CanvasTextStyle {
                     color: content.color,
                     weight: content.weight,
+                    dim: content.dim,
+                    strikethrough: content.strikethrough,
                     underline: content.decoration == TextDecoration::Underline,
                     italic: content.italic,
                     invert: content.invert,
@@ -254,6 +274,59 @@ mod tests {
         }
         .render(None);
         assert!(canvas.cell(0, 0).unwrap().text_style().unwrap().invert);
+    }
+
+    #[test]
+    fn test_mixed_text_independent_attributes_and_transitions() {
+        let canvas = element! {
+            View(width: 20) {
+                MixedText(contents: vec![
+                    MixedTextContent::new("A").weight(Weight::Bold).dim().strikethrough(),
+                    MixedTextContent::new("B").weight(Weight::Bold),
+                    MixedTextContent::new("C").weight(Weight::Light),
+                    MixedTextContent::new("D").weight(Weight::Bold),
+                    MixedTextContent::new("E").weight(Weight::Bold).dim(),
+                    MixedTextContent::new("F").dim(),
+                    MixedTextContent::new("G"),
+                ])
+            }
+        }
+        .render(None);
+        let style = canvas.cell(0, 0).unwrap().text_style().unwrap();
+        assert_eq!(style.weight, Weight::Bold);
+        assert!(style.dim && style.strikethrough);
+        let mut ansi = Vec::new();
+        canvas.write_ansi(&mut ansi).unwrap();
+        let ansi = String::from_utf8(ansi).unwrap();
+        assert!(
+            ansi.contains(concat!(
+                "\x1b[1m\x1b[2m\x1b[9mA", // combined attributes
+                "\x1b[0m\x1b[1mB",        // dim + strike removed
+                "\x1b[0m\x1b[2mC",        // legacy Light is dim-only
+                "\x1b[0m\x1b[1mD",        // legacy Light -> Bold clears dim
+                "\x1b[2mE",               // add dim while keeping bold
+                "\x1b[0m\x1b[2mF",        // remove bold while keeping dim
+                "\x1b[0mG",               // no attributes leak
+            )),
+            "{ansi:?}"
+        );
+    }
+
+    #[test]
+    fn test_strikethrough_does_not_cover_empty_padding() {
+        let mut node = element! {
+            View(width: 8) {
+                MixedText(contents: vec![MixedTextContent::new("done").strikethrough()])
+            }
+        };
+        let mut canvas = node.render(None);
+        canvas
+            .subview_mut(0, 0, 0, 0, 8, 1)
+            .set_text(6, 0, "X", CanvasTextStyle::default());
+        let mut bytes = Vec::new();
+        canvas.write_ansi(&mut bytes).unwrap();
+        let ansi = String::from_utf8(bytes).unwrap();
+        assert!(ansi.contains("\x1b[9mdone\x1b[0m"), "{ansi:?}");
     }
 
     #[test]

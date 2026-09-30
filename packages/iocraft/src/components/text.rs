@@ -51,6 +51,12 @@ pub struct TextProps {
     /// The weight of the text.
     pub weight: Weight,
 
+    /// Whether to dim the text, independently of its weight.
+    pub dim: bool,
+
+    /// Whether to draw a strikethrough through the text.
+    pub strikethrough: bool,
+
     /// The text wrapping behavior.
     pub wrap: TextWrap,
 
@@ -262,6 +268,8 @@ impl Component for Text {
         self.style = CanvasTextStyle {
             color: props.color,
             weight: props.weight,
+            dim: props.dim,
+            strikethrough: props.strikethrough,
             underline: props.decoration == TextDecoration::Underline,
             italic: props.italic,
             invert: props.invert,
@@ -395,6 +403,18 @@ mod tests {
     fn test_text_invert() {
         let canvas = element!(Text(content: "foo", invert: true)).render(None);
         assert!(canvas.cell(0, 0).unwrap().text_style().unwrap().invert);
+    }
+
+    #[test]
+    fn test_text_independent_attributes() {
+        let canvas = element!(Text(
+            content: "done", weight: Weight::Bold, dim: true, strikethrough: true
+        ))
+        .render(None);
+        let style = canvas.cell(0, 0).unwrap().text_style().unwrap();
+        assert_eq!(style.weight, Weight::Bold);
+        assert!(style.dim);
+        assert!(style.strikethrough);
     }
 
     #[test]
