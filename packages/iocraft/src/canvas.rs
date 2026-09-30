@@ -623,8 +623,7 @@ impl CanvasSubviewMut<'_> {
         let horizontal_space = max_x - x + 1;
         let min_y = self.clip_y.max(0);
         let max_y = (self.clip_y + self.clip_height as isize).min(self.canvas.height() as _) - 1;
-        let mut y = self.y + y;
-        for line in text.lines() {
+        for (y, line) in (self.y + y..).zip(text.lines()) {
             if y >= min_y && y <= max_y {
                 let mut skipped_width = 0;
                 let mut taken_width = 0;
@@ -651,7 +650,6 @@ impl CanvasSubviewMut<'_> {
                     style,
                 );
             }
-            y += 1;
         }
     }
 }
