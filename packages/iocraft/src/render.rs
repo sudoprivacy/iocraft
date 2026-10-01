@@ -485,6 +485,9 @@ impl<'a> Tree<'a> {
             term.refresh_size();
             let terminal_size = term.size();
             term.synchronized_update(|mut term| {
+                if term.begin_frame()? {
+                    prev_canvas = None;
+                }
                 let output = self.render(terminal_size.map(|(w, _)| w as usize), Some(&mut term));
                 if output.did_clear_terminal_output || prev_canvas.as_ref() != Some(&output.canvas)
                 {
@@ -496,6 +499,7 @@ impl<'a> Tree<'a> {
                     term.write_canvas(prev, &output.canvas)?;
                 }
                 prev_canvas = Some(output.canvas);
+                term.end_frame()?;
                 Ok(())
             })?;
             if let Some(requested) = self.system_context.mouse_capture() {
