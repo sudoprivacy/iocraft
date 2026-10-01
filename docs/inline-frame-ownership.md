@@ -78,8 +78,11 @@ the live frame is corrupted. This slice passes all non-resize stages with
 both bundled and system ConPTY, retaining all 70 seeded lines, the startup
 sentinel and the draft.
 
-The optional resize stage is **still failing**, including duplicate status
-content after shrinking to 60x18. Do not install or describe this slice as the
+The optional resize stage is **still failing**. A stricter driver waits for new
+backend output and an exact new-width separator, not just an already-visible
+status marker; it catches duplication at the first 240x40 to 100x40 resize.
+An earlier, weaker settle check did not fail until 60x18. Those intermediate
+apparent passes are not valid evidence of resize recovery. Do not install or describe this slice as the
 resize fix. `--all-targets --all-features` Clippy also reports 18 pre-existing
 test-code lint errors on both the baseline and this branch; no suppressions
 were added. CI-equivalent checks are reported separately.
