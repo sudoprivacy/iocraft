@@ -1,9 +1,8 @@
-use crate::{ComponentUpdater, Hook, Hooks};
+use crate::{terminal::HistoryMessage as Message, ComponentUpdater, Hook, Hooks};
 use core::{
     pin::Pin,
     task::{Context, Poll, Waker},
 };
-use crossterm::{cursor, QueueableCommand};
 use std::sync::{Arc, Mutex};
 
 mod private {
@@ -56,18 +55,10 @@ impl UseOutput for Hooks<'_, '_> {
     }
 }
 
-enum Message {
-    Stdout(String),
-    StdoutNoNewline(String),
-    Stderr(String),
-    StderrNoNewline(String),
-}
-
 #[derive(Default)]
 struct UseOutputState {
     queue: Vec<Message>,
     waker: Option<Waker>,
-    appended_newline: Option<u16>,
 }
 
 impl UseOutputState {
@@ -76,78 +67,10 @@ impl UseOutputState {
             return;
         }
 
-        // Check if we have a terminal - if not, messages stay queued
-        if updater.terminal_mut().is_none() {
-            return;
-        }
-
-        updater.clear_terminal_output();
-        let terminal = updater.terminal_mut().unwrap();
-        let needs_carriage_returns = terminal.is_raw_mode_enabled();
-
-        if let Some(col) = self.appended_newline {
-            let _ = terminal
-                .render_output()
-                .queue(cursor::MoveUp(1))
-                .and_then(|w| w.queue(cursor::MoveRight(col)));
-        }
-        // Flush render output to ensure escape sequences are sent before any
-        // cross-stream writes (e.g., stdout messages when rendering to stderr).
-        let _ = terminal.render_output().flush();
-
-        let mut needs_extra_newline = self.appended_newline.is_some();
-
-        for msg in self.queue.drain(..) {
-            match msg {
-                Message::Stdout(msg) => {
-                    let formatted = if needs_carriage_returns {
-                        format!("{}\r\n", msg)
-                    } else {
-                        format!("{}\n", msg)
-                    };
-                    let _ = terminal.stdout().write_all(formatted.as_bytes());
-                    needs_extra_newline = false;
-                }
-                Message::StdoutNoNewline(msg) => {
-                    let _ = terminal.stdout().write_all(msg.as_bytes());
-                    if !msg.is_empty() {
-                        needs_extra_newline = !msg.ends_with('\n');
-                    }
-                }
-                Message::Stderr(msg) => {
-                    let formatted = if needs_carriage_returns {
-                        format!("{}\r\n", msg)
-                    } else {
-                        format!("{}\n", msg)
-                    };
-                    let _ = terminal.stderr().write_all(formatted.as_bytes());
-                    needs_extra_newline = false;
-                }
-                Message::StderrNoNewline(msg) => {
-                    let _ = terminal.stderr().write_all(msg.as_bytes());
-                    if !msg.is_empty() {
-                        needs_extra_newline = !msg.ends_with('\n');
-                    }
-                }
-            }
-        }
-
-        if needs_extra_newline {
-            // Flush stdout and stderr so the terminal processes all written bytes
-            // before we query the cursor position. Without this, the cursor position
-            // would reflect the state before the no-newline message was rendered,
-            // causing subsequent appended output to be placed at the wrong column.
-            let _ = terminal.stdout().flush();
-            let _ = terminal.stderr().flush();
-            if let Ok(pos) = cursor::position() {
-                self.appended_newline = Some(pos.0);
-                let newline = if needs_carriage_returns { "\r\n" } else { "\n" };
-                let _ = terminal.render_output().write_all(newline.as_bytes());
-            } else {
-                self.appended_newline = None;
-            }
-        } else {
-            self.appended_newline = None;
+        // Static rendering leaves messages queued. Terminal rendering commits
+        // every hook's batch together before presenting the next live frame.
+        if let Some(terminal) = updater.terminal_mut() {
+            terminal.enqueue_history(self.queue.drain(..));
         }
     }
 }

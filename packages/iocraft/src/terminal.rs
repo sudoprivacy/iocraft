@@ -18,6 +18,10 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
+mod frame;
+pub(crate) use frame::HistoryMessage;
+use frame::PresentationState;
+
 // Re-exports for basic types.
 pub use crossterm::event::{KeyCode, KeyEventKind, KeyEventState, KeyModifiers, MouseEventKind};
 
@@ -127,6 +131,9 @@ trait TerminalImpl: Write + Send {
     }
 
     fn is_raw_mode_enabled(&self) -> bool;
+    fn cursor_column(&mut self) -> io::Result<u16> {
+        cursor::position().map(|(column, _)| column)
+    }
     fn begin_frame(&mut self) -> io::Result<bool> {
         Ok(false)
     }
@@ -643,6 +650,7 @@ impl TerminalImpl for MockTerminal {
 
 pub(crate) struct Terminal<'a> {
     inner: Box<dyn TerminalImpl + 'a>,
+    presentation: PresentationState,
     output: Output,
     event_stream: Option<BoxStream<'static, io::Result<TerminalEvent>>>,
     subscribers: Vec<Weak<Mutex<TerminalEventsInner>>>,
@@ -665,6 +673,7 @@ impl<'a> Terminal<'a> {
         };
         Ok(Self {
             inner: Box::new(StdTerminal::new(dest, alt, fullscreen, mouse_capture)?),
+            presentation: PresentationState::default(),
             output,
             event_stream: None,
             subscribers: Vec::new(),
@@ -698,44 +707,28 @@ impl<'a> Terminal<'a> {
     }
 
     pub fn clear_canvas(&mut self) -> io::Result<()> {
-        self.inner.clear_canvas()
+        self.presentation.clear(&mut *self.inner)
     }
 
-    pub fn begin_frame(&mut self) -> io::Result<bool> {
-        self.inner.begin_frame()
+    pub fn begin_frame(&mut self) -> io::Result<()> {
+        self.presentation.begin_frame(&mut *self.inner)
     }
 
     pub fn end_frame(&mut self) -> io::Result<()> {
         self.inner.end_frame()
     }
 
-    pub fn write_canvas(&mut self, prev: Option<&Canvas>, canvas: &Canvas) -> io::Result<()> {
-        self.inner.write_canvas(prev, canvas)
+    pub fn present(&mut self, canvas: Canvas) -> io::Result<()> {
+        self.presentation
+            .present(&mut *self.inner, self.output, canvas)
+    }
+
+    pub fn enqueue_history(&mut self, messages: impl IntoIterator<Item = HistoryMessage>) {
+        self.presentation.enqueue(messages);
     }
 
     pub fn received_ctrl_c(&self) -> bool {
         self.received_ctrl_c
-    }
-
-    /// Returns a mutable reference to the stdout handle.
-    pub fn stdout(&mut self) -> &mut dyn Write {
-        match self.output {
-            Output::Stdout => self.inner.dest(),
-            Output::Stderr => self.inner.alt(),
-        }
-    }
-
-    /// Returns a mutable reference to the stderr handle.
-    pub fn stderr(&mut self) -> &mut dyn Write {
-        match self.output {
-            Output::Stdout => self.inner.alt(),
-            Output::Stderr => self.inner.dest(),
-        }
-    }
-
-    /// Returns a mutable reference to the render output handle (stdout or stderr based on output setting).
-    pub fn render_output(&mut self) -> &mut dyn Write {
-        self.inner.dest()
     }
 
     /// Wraps a series of terminal updates in a synchronized update block, making sure to end the
@@ -807,6 +800,7 @@ impl Terminal<'static> {
         (
             Self {
                 inner: Box::new(term),
+                presentation: PresentationState::default(),
                 output: Output::Stdout,
                 event_stream: None,
                 subscribers: Vec::new(),
@@ -899,7 +893,7 @@ mod tests {
         assert!(!terminal.received_ctrl_c());
         assert!(!terminal.is_raw_mode_enabled());
         let canvas = Canvas::new(10, 1);
-        terminal.write_canvas(None, &canvas).unwrap();
+        terminal.present(canvas).unwrap();
     }
 
     fn render_canvas_to_vt(canvas: &Canvas, cols: usize, rows: usize) -> avt::Vt {
@@ -1656,7 +1650,7 @@ mod tests {
             )
             .unwrap();
             let canvas = Canvas::new(10, 1);
-            terminal.write_canvas(None, &canvas).unwrap();
+            terminal.present(canvas).unwrap();
         }
 
         assert!(!stdout_buf.is_empty());
