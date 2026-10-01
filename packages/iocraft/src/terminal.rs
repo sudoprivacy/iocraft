@@ -127,6 +127,12 @@ trait TerminalImpl: Write + Send {
     }
 
     fn is_raw_mode_enabled(&self) -> bool;
+    fn begin_frame(&mut self) -> io::Result<bool> {
+        Ok(false)
+    }
+    fn end_frame(&mut self) -> io::Result<()> {
+        Ok(())
+    }
     fn clear_canvas(&mut self) -> io::Result<()>;
     fn write_canvas(&mut self, prev: Option<&Canvas>, canvas: &Canvas) -> io::Result<()>;
     fn event_stream(&mut self) -> io::Result<BoxStream<'static, io::Result<TerminalEvent>>>;
@@ -162,6 +168,7 @@ struct StdTerminal<'a> {
     prev_canvas_top_row: u16,
     prev_canvas_height: u16,
     prev_size_on_write: Option<(u16, u16)>,
+    inline_anchored: bool,
     size: Option<(u16, u16)>,
 }
 
@@ -202,6 +209,51 @@ impl TerminalImpl for StdTerminal<'_> {
         self.raw_mode_enabled
     }
 
+    fn begin_frame(&mut self) -> io::Result<bool> {
+        if !self.inline_anchored {
+            return Ok(false);
+        }
+        self.inline_anchored = false;
+        if self.prev_size_on_write != self.size {
+            // The terminal has reflowed the old canvas. Its old row count is
+            // no longer a cursor offset, but the cursor itself still marks
+            // the first owned row. Erase only from that anchor, never history.
+            self.dest
+                .queue(cursor::MoveToColumn(0))?
+                .queue(terminal::Clear(terminal::ClearType::FromCursorDown))?;
+            self.prev_canvas_height = 0;
+            return Ok(true);
+        }
+        let rows = self.prev_canvas_height.saturating_sub(1);
+        if rows > 0 {
+            self.dest.queue(cursor::MoveToNextLine(rows))?;
+        }
+        Ok(false)
+    }
+
+    fn end_frame(&mut self) -> io::Result<()> {
+        // Between frames keep the hidden cursor at the start of the inline
+        // canvas. The terminal then carries the anchor through native reflow;
+        // reconstructing it from the old height would leave duplicate rows.
+        // A canvas taller than the viewport has no reachable first row and
+        // continues to use the existing oversized-canvas fallback.
+        if !self.fullscreen
+            && self.prev_canvas_height > 0
+            && self
+                .size
+                .is_some_and(|(_, rows)| self.prev_canvas_height < rows)
+        {
+            let rows = self.prev_canvas_height - 1;
+            if rows > 0 {
+                self.dest.queue(cursor::MoveToPreviousLine(rows))?;
+            } else {
+                self.dest.queue(cursor::MoveToColumn(0))?;
+            }
+            self.inline_anchored = true;
+        }
+        Ok(())
+    }
+
     fn clear_canvas(&mut self) -> io::Result<()> {
         if self.prev_canvas_height == 0 {
             return Ok(());
@@ -237,6 +289,7 @@ impl TerminalImpl for StdTerminal<'_> {
                 self.dest.queue(cursor::MoveTo(0, 0))?;
             }
             self.prev_canvas_height = canvas.height() as _;
+            self.prev_size_on_write = self.size;
             canvas.write_ansi_without_final_newline(&mut *self.dest)?;
             return Ok(());
         };
@@ -430,6 +483,7 @@ impl<'a> StdTerminal<'a> {
             prev_canvas_height: 0,
             size: None,
             prev_size_on_write: None,
+            inline_anchored: false,
         };
         term.dest.queue(cursor::Hide)?;
         if fullscreen {
@@ -478,6 +532,9 @@ impl Drop for StdTerminal<'_> {
         if self.fullscreen {
             let _ = self.dest.queue(terminal::LeaveAlternateScreen);
         } else if self.prev_canvas_height > 0 {
+            if self.inline_anchored {
+                let _ = self.begin_frame();
+            }
             let _ = self.dest.write_all(b"\r\n");
         }
         let _ = self.dest.execute(cursor::Show);
@@ -642,6 +699,14 @@ impl<'a> Terminal<'a> {
 
     pub fn clear_canvas(&mut self) -> io::Result<()> {
         self.inner.clear_canvas()
+    }
+
+    pub fn begin_frame(&mut self) -> io::Result<bool> {
+        self.inner.begin_frame()
+    }
+
+    pub fn end_frame(&mut self) -> io::Result<()> {
+        self.inner.end_frame()
     }
 
     pub fn write_canvas(&mut self, prev: Option<&Canvas>, canvas: &Canvas) -> io::Result<()> {
@@ -1036,6 +1101,7 @@ mod tests {
             prev_canvas_height,
             size: None,
             prev_size_on_write: None,
+            inline_anchored: false,
         }
     }
 
@@ -1061,6 +1127,7 @@ mod tests {
             prev_canvas_height,
             size: Some(term_size),
             prev_size_on_write: None,
+            inline_anchored: false,
         }
     }
 
@@ -1729,5 +1796,92 @@ mod tests {
         assert_eq!(vt.line(2).text(), "row2      ");
         assert_eq!(vt.line(3).text(), "row3      ");
         assert_eq!(vt.line(4).text(), "FOOTER    ");
+    }
+
+    #[test]
+    fn test_inline_frame_anchor_survives_reflow_without_erasing_history() {
+        let (dest, bytes) = new_test_writer();
+        let mut term = new_inline_term_with_size(dest, 0, (80, 20));
+        let mut vt = avt::Vt::new(80, 20);
+        vt.feed_str("HistorySentinel\r\n");
+        let mut previous = None;
+        for (cols, rows) in [(80, 20), (30, 20), (80, 20), (20, 8), (80, 20)] {
+            vt.resize(cols, rows);
+            term.size = Some((cols as u16, rows as u16));
+            if term.begin_frame().unwrap() {
+                previous = None;
+            }
+            let canvas = element! {
+                View(width: cols as u32, flex_direction: FlexDirection::Column) {
+                    Text(content: "StatusMarker long status with enough text to wrap at narrow widths")
+                    Text(content: "TodoMarker")
+                    Text(content: "─".repeat(cols))
+                    Text(content: "InputMarker")
+                }
+            }.render(Some(cols));
+            term.write_canvas(previous.as_ref(), &canvas).unwrap();
+            term.end_frame().unwrap();
+            previous = Some(canvas);
+            let frame = String::from_utf8(std::mem::take(&mut *bytes.lock().unwrap())).unwrap();
+            assert!(
+                !frame.contains("\x1b[2J"),
+                "must not clear the whole screen"
+            );
+            assert!(!frame.contains("\x1b[3J"), "must not purge scrollback");
+            vt.feed_str(&frame);
+            let text = vt.text().join("\n");
+            for marker in [
+                "HistorySentinel",
+                "StatusMarker",
+                "TodoMarker",
+                "InputMarker",
+            ] {
+                assert_eq!(text.matches(marker).count(), 1, "{cols} columns: {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_inline_frame_restores_diff_origin_and_output_clear() {
+        let (dest, bytes) = new_test_writer();
+        let mut term = new_inline_term_with_size(dest, 0, (40, 10));
+        let mut vt = avt::Vt::new(40, 10);
+        vt.feed_str("HistorySentinel\r\n");
+        let mut previous = None;
+        for label in ["OldFooter", "NewFooter"] {
+            assert!(!term.begin_frame().unwrap());
+            let canvas = element! {
+                View(flex_direction: FlexDirection::Column) {
+                    Text(content: "StatusMarker")
+                    Text(content: label)
+                }
+            }
+            .render(Some(40));
+            term.write_canvas(previous.as_ref(), &canvas).unwrap();
+            term.end_frame().unwrap();
+            previous = Some(canvas);
+            let frame = String::from_utf8(std::mem::take(&mut *bytes.lock().unwrap())).unwrap();
+            if label == "NewFooter" {
+                assert!(
+                    !frame.contains("StatusMarker"),
+                    "unchanged rows still use diffing"
+                );
+            }
+            vt.feed_str(&frame);
+        }
+        assert_eq!(vt.cursor().row, 1, "idle cursor is the start anchor");
+        assert!(!term.begin_frame().unwrap());
+        term.clear_canvas().unwrap();
+        write!(term.dest, "CommittedOutput\r\n").unwrap();
+        let canvas = element!(Text(content: "ReplacementChrome")).render(Some(40));
+        term.write_canvas(None, &canvas).unwrap();
+        term.end_frame().unwrap();
+        vt.feed_str(&String::from_utf8(std::mem::take(&mut *bytes.lock().unwrap())).unwrap());
+        let text = vt.text().join("\n");
+        for marker in ["HistorySentinel", "CommittedOutput", "ReplacementChrome"] {
+            assert_eq!(text.matches(marker).count(), 1, "{text}");
+        }
+        assert!(!text.contains("Footer"));
+        assert!(!text.contains("StatusMarker"));
     }
 }
