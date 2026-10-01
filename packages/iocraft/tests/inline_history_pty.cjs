@@ -32,6 +32,13 @@ child.onData(data => {
   terminal.write(data, () => pending--);
 });
 terminal.onData(data => child.write(data));
+// Match VS Code's ConPTY device-attributes reply, not xterm's default DA.
+if (process.platform === 'win32') terminal.parser.registerCsiHandler({ final: 'c' }, params => {
+  if (!params.length || (params.length === 1 && params[0] === 0)) {
+    child.write('\x1b[?61;4c'); return true;
+  }
+  return false;
+});
 child.onExit(() => { exited = true; });
 async function settle(marker, width, notBefore = 0) {
   const start = Date.now();

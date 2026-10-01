@@ -95,3 +95,24 @@ packages): build `cargo build -p iocraft --example inline_history_fixture`, set
 asar/native modules, use that installation's Code executable with
 `ELECTRON_RUN_AS_NODE=1`. These diagnostic runs do not touch the user's terminal
 history or start an agent/model session.
+
+### Recovery experiments (not included in the implementation)
+
+The tail-only candidate was retested without the earlier bottom-docking code.
+It still failed: missing Footer in bundled ConPTY after repeated width changes,
+and missing history in system ConPTY. Do not attribute the earlier failures to
+bottom docking alone or merge the tail candidate.
+
+A static control writes 70 numbered history lines and a six-row frame once,
+then does **no redraw on resize**. With system ConPTY / xterm in the tested
+configuration, 240x40 -> 100x40 -> 240x40 loses history lines 37..41; the next
+60-column round trip additionally loses 42..44. Bundled ConPTY retains all 70.
+This is evidence of a backend/model interaction independent of our redraw, not
+permission to weaken preservation checks or a universal claim about Windows.
+
+The harness mirrors VS Code 1.140.0's `reflowCursorLine` setting and its ConPTY
+primary device-attributes reply (`CSI ? 61 ; 4 c`). The static control was rerun
+with that reply and reproduced the same loss. The native Windows screen-buffer
+view is also not always the frontend's view: with bundled ConPTY after widening,
+the native Status row remains 28 while xterm displays it at 33. A Windows cursor
+or screen-read query alone is therefore not an authoritative frontend boundary.
