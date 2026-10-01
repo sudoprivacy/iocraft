@@ -96,6 +96,12 @@ function check(label, phase, committed) {
     for (let i = 0; i < 100 && !exited; i++) await sleep(20);
     assert(exited, 'fixture failed to exit');
   } finally {
+    // Give the owned fixture a normal exit even when an assertion fails;
+    // abruptly closing a live ConPTY can hang native-host teardown.
+    if (!exited) {
+      child.write('\x1b');
+      for (let i = 0; i < 100 && !exited; i++) await sleep(20);
+    }
     if (!exited) child.kill();
     terminal.dispose();
   }
