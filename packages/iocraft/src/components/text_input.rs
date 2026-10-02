@@ -488,7 +488,6 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
     hooks.use_terminal_events({
         let mut buffer = buffer.clone();
         let mut buffer_dirty = false;
-        let mut value = props.value.clone();
         let mut event_cursor = cursor_offset.get();
         let mut on_change = props.on_change.take();
         let mut on_paste = props.on_paste.take();
@@ -496,6 +495,9 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
             if !has_focus {
                 return;
             }
+            // Edit the cursor's owning value in place. The controlled-parent
+            // callback needs one clone, not a second full draft copy per key.
+            let mut value = cursor_value.write();
 
             // Editing and navigation share one working value/cursor for the
             // entire event batch. Rewrap lazily, only when a movement needs
@@ -627,13 +629,14 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
                 _ => {}
             }
 
+            let next_value = text_changed.then(|| value.clone());
+            drop(value);
             if cursor_offset != event_cursor {
                 cursor_offset.set(event_cursor);
             }
-            if text_changed {
+            if let Some(next_value) = next_value {
                 buffer_dirty = true;
-                cursor_value.set(value.clone());
-                on_change(value.clone());
+                on_change(next_value);
             }
         }
     });
