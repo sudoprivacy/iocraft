@@ -171,10 +171,10 @@ recorded in that run. Retain those logs, but do not confuse an incomplete sample
 with verified content loss. The rapid-then-slow Status duplication above was
 reproduced after receiving the matching new Footer acknowledgment.
 
-Remaining before delivery: verified region recovery, an explicit layout height
-budget, and
-non-destructive reporting when old live rows are no longer addressable. The
-small-window folding/scrolling policy still needs the application's decision.
+Remaining before delivery: verified region recovery and non-destructive reporting
+when old live rows are no longer addressable. The owner has approved input-first
+small-window folding; its height budget and bounded review body are implemented
+in sudocode draft #846, but are not yet merged or installed.
 
 ### Real PTY CI coverage
 
@@ -221,3 +221,47 @@ The pinned node-pty can emit its public exit event on pipe close before its nati
 callback records an exit code. The driver waits for that native result when the
 event carries no code; an absent result still fails. Local negative controls with
 `IOCRAFT_FIXTURE_EXIT_CODE=7` failed on both backends with the actual code 7.
+
+### Live-frame output batches
+
+The terminal now stages live-frame bytes until the synchronized-update boundary.
+A Canvas's internal flush no longer exposes an incomplete application frame.
+History writes still use explicit barriers before stream switches and cursor
+queries. The public component-clear API also retains its immediate-clear ordering
+before external output; it has not silently become a deferred request.
+
+Normal completion explicitly closes and flushes the update and returns failures.
+The drop guard is only best-effort cleanup for early errors or panics, not the
+normal error-reporting path. A failed partial write is not replayed on drop.
+Four new regressions cover internal flush deferral, explicit-clear ordering,
+final-flush error propagation, and closing on body errors/panics. This remains
+a bounded current-output batch, not a transcript replay cache.
+
+This is **not an atomic PTY/resize transaction**. The PR's top-anchor geometry
+still fails the real bundled-ConPTY resize test. The buffer, history barriers
+and error propagation are a separate implementation slice, not a resize waiver.
+
+### Explicit recovery research, not deployed
+
+The owner accepted preserving history and the draft, displaying one clear notice,
+and continuing input when the old UI cannot be erased losslessly. Such recovery
+must be reported as degraded, not as artifact-free success. Reachable ordinary
+resize still has to clear the old live region.
+
+A tail-anchor/native-cursor experiment recorded the old frame starting at absolute
+row 74 while frontend resize raised the viewport start to 75, before requesting
+the child resize. Its old frame needed 13 rows above a cursor reported at row 12.
+That supports runtime detection in this sample, not an authoritative native
+cursor guarantee for all hosts.
+
+Combining the experimental policy with staged writes and stale-layout rejection
+passed 10 bundled-ConPTY rapid/slow matrices without application or wire tracing,
+including new typing and history after recovery. Adding history during resize at
+1, 17 and 40 ms intervals passed 8 of 9 runs; one 17 ms run still duplicated visible
+Status. System ConPTY still failed history preservation. The failed cases remain
+failures; they are not silently accepted as the newly approved degradation.
+
+The experiment is retained locally as `experiment/reflow-boundary-evidence`,
+commit `189eb5a`. Its temporary worktree was removed; logs remain. The runtime
+notice, cursor classification, tail anchor, timer, precommit layout retry and
+experimental deferred-clear API are not included in this PR.
