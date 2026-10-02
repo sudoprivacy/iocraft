@@ -2,11 +2,11 @@ use crate::{
     component,
     components::{TextDecoration, TextDrawer, TextWrap, View},
     element,
-    hooks::{Ref, State, UseMemo, UseState, UseTerminalEvents},
+    hooks::{Ref, State, UseComponentRect, UseMemo, UseState, UseTerminalEvents},
     segmented_string::SegmentedString,
     AnyElement, CanvasTextStyle, Color, Component, ComponentDrawer, ComponentUpdater, HandlerMut,
-    Hook, Hooks, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, LayoutStyle, Overflow, Position,
-    Props, Size, TerminalEvent, Weight,
+    Hooks, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, LayoutStyle, Overflow, Position, Props,
+    Size, TerminalEvent, Weight,
 };
 use std::sync::Arc;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -122,28 +122,6 @@ pub struct TextInputProps {
 
     /// An optional handle which can be used for imperative control of the input.
     pub handle: Option<Ref<TextInputHandle>>,
-}
-
-trait UseSize<'a> {
-    fn use_size(&mut self) -> (u16, u16);
-}
-
-impl<'a> UseSize<'a> for Hooks<'a, '_> {
-    fn use_size(&mut self) -> (u16, u16) {
-        self.use_hook(UseSizeImpl::default).size
-    }
-}
-
-#[derive(Default)]
-struct UseSizeImpl {
-    size: (u16, u16),
-}
-
-impl Hook for UseSizeImpl {
-    fn pre_component_draw(&mut self, drawer: &mut ComponentDrawer) {
-        let s = drawer.size();
-        self.size = (s.width, s.height);
-    }
 }
 
 struct TextBufferRow {
@@ -402,7 +380,14 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
     let mut scroll_offset_row = hooks.use_state(|| 0u16);
     let mut scroll_offset_col = hooks.use_state(|| 0u16);
     let mut vertical_movement_col_preference = hooks.use_state(|| None);
-    let (width, height) = hooks.use_size();
+    // Layout is available after drawing. Use the shared reactive hook so a
+    // size change schedules the follow-up frame even when no keys arrive.
+    let (width, height) = hooks.use_component_rect().map_or((0, 0), |rect| {
+        (
+            (rect.right - rect.left) as u16,
+            (rect.bottom - rect.top) as u16,
+        )
+    });
 
     if let Some(handle_ref) = props.handle.as_mut() {
         handle_ref.set(TextInputHandle {
@@ -467,6 +452,16 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
             scroll_offset_row.set(cursor_row - height + 1);
         } else if cursor_row < scroll_offset_row.get() {
             scroll_offset_row.set(cursor_row as _);
+        }
+        // Growing the viewport (or shrinking/reflowing the content) must bring
+        // earlier rows back. Keeping the cursor visible alone leaves a stale
+        // tail offset with blank rows beneath it after an enlarge operation.
+        let max_scroll_offset_row = buffer
+            .row_count()
+            .saturating_sub(height as usize)
+            .min(u16::MAX as usize) as u16;
+        if scroll_offset_row.get() > max_scroll_offset_row {
+            scroll_offset_row.set(max_scroll_offset_row);
         }
         if auto_grow {
             if scroll_offset_col.get() != 0 {
@@ -855,6 +850,64 @@ mod tests {
             .await;
         let expected = vec!["  \n\n\n", " foo\n ! \n\n"];
         assert_eq!(actual, expected);
+    }
+
+    #[component]
+    fn ResizableInput(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let (width, height) = hooks.use_terminal_size();
+        let mut value = hooks.use_state(|| "alpha\nbravo\ncharlie".to_string());
+        element! {
+            View(width, height) {
+                TextInput(multiline: true, has_focus: true, value: value.to_string(),
+                    on_change: move |next| value.set(next))
+            }
+        }
+    }
+
+    #[apply(test!)]
+    async fn multiline_input_restores_rows_after_resize_without_another_key() {
+        let (events, receiver) = futures::channel::mpsc::unbounded();
+        let mut app = element!(ResizableInput);
+        let frames = app.mock_terminal_render_loop(MockTerminalConfig::with_events(receiver));
+        futures::pin_mut!(frames);
+
+        async fn until(
+            mut frames: std::pin::Pin<&mut impl futures::Stream<Item = Canvas>>,
+            expected: &str,
+        ) -> String {
+            smol::future::or(
+                async {
+                    while let Some(frame) = frames.next().await {
+                        let screen = frame.to_string();
+                        if screen.trim_end() == expected {
+                            return screen;
+                        }
+                    }
+                    panic!("frame stream ended before {expected:?}");
+                },
+                async {
+                    smol::Timer::after(std::time::Duration::from_secs(2)).await;
+                    panic!("layout failed to settle without a key: {expected:?}");
+                },
+            )
+            .await
+        }
+
+        events.unbounded_send(TerminalEvent::Resize(12, 1)).unwrap();
+        until(frames.as_mut(), "charlie").await;
+        events.unbounded_send(TerminalEvent::Resize(12, 4)).unwrap();
+        until(frames.as_mut(), "alpha\nbravo\ncharlie").await;
+        events.unbounded_send(TerminalEvent::Resize(6, 5)).unwrap();
+        until(frames.as_mut(), "alpha\nbravo\ncharl\nie").await;
+        events.unbounded_send(TerminalEvent::Resize(12, 4)).unwrap();
+        until(frames.as_mut(), "alpha\nbravo\ncharlie").await;
+        events
+            .unbounded_send(TerminalEvent::Key(KeyEvent::new(
+                KeyEventKind::Press,
+                KeyCode::Char('!'),
+            )))
+            .unwrap();
+        until(frames.as_mut(), "alpha\nbravo\ncharlie!").await;
     }
 
     #[test]
