@@ -1,7 +1,7 @@
 // Real-PTY history transaction regression. On Windows this may run with
 // ELECTRON_RUN_AS_NODE=1 using VS Code's matching node-pty/xterm modules.
 // IOCRAFT_TERMINAL_MODULES points at node_modules (or node_modules.asar).
-// Usage: node inline_history_pty.cjs <fixture.exe> [bundled|system] [resize|rapid|tiny]
+// Usage: node inline_history_pty.cjs <fixture.exe> [bundled|system] [resize|rapid|tiny|oversized-history]
 // Resize modes are acceptance diagnostics; a failing run must not be reported
 // as a passing regression. IOCRAFT_WIRE_TRACE optionally saves fixture VT bytes.
 const path = require('node:path');
@@ -15,7 +15,7 @@ const { Terminal } = fromHost('@xterm/headless');
 const [fixture, mode = 'bundled', resize] = process.argv.slice(2);
 assert(fixture, 'pass an explicitly built fixture executable');
 assert(['bundled', 'system'].includes(mode), `unknown backend: ${mode}`);
-assert(!resize || ['resize', 'rapid', 'tiny'].includes(resize), `unknown scenario: ${resize}`);
+assert(!resize || ['resize', 'rapid', 'tiny', 'oversized-history'].includes(resize), `unknown scenario: ${resize}`);
 const trace = record => {
   if (process.env.IOCRAFT_WIRE_TRACE)
     fs.appendFileSync(process.env.IOCRAFT_WIRE_TRACE, JSON.stringify({ time: Date.now(), ...record }) + '\n');
@@ -118,7 +118,25 @@ function check(label, phase, committed) {
     await settle('FooterMarker p5 a0 240x40');
     const committed = ['SharedPartialJoined', 'SameBatch:end', 'StdoutPrefix:StderrSuffix'];
     check('cross-stream order', 5, committed);
-    if (resize) {
+    if (resize === 'oversized-history') {
+      // A large live panel can exceed the viewport without any terminal resize.
+      // Closing it must preserve shell history and earlier committed output.
+      // This data-retention check does not waive the strict resize matrix above.
+      child.write('\x1b[18~'); // F7: expand beyond the 40-row viewport.
+      await settle('FooterMarker p7 a0 240x40', 240);
+      assert(snapshot().includes('Expanded live content'), 'large panel did not open');
+      child.write('\x1b[19~'); // F8: close the panel, exercising offscreen recovery.
+      await settle('FooterMarker p8 a0 240x40', 240);
+      const lines = snapshot().split('\n');
+      for (const expected of ['ShellHistoryBeforeScode', ...committed,
+        ...Array.from({ length: 70 }, (_, i) => `Earlier history line ${i}`)]) {
+        assert.equal(lines.filter(line => line === expected).length, 1,
+          `closing oversized panel lost or duplicated history: ${expected}\n${snapshot()}`);
+      }
+      assert(snapshot().includes('DraftSurvives'), 'closing panel lost the draft');
+      console.log(JSON.stringify({ mode, label: 'oversized panel history', historyLines: 70,
+        committed, staleLiveRows: lines.filter(line => line === 'Expanded live content').length }));
+    } else if (resize) {
       let acknowledgment = 0;
       function resizeTo(cols, rows) {
         const before = geometry('before frontend resize');
@@ -151,9 +169,18 @@ function check(label, phase, committed) {
       }
     }
     child.write('\x1b');
-    for (let i = 0; i < 100 && !exited; i++) await sleep(20);
+    for (let i = 0; i < 250; i++) {
+      // With the pinned node-pty on Windows, pipe close can emit onExit before
+      // the native process-exit callback stores its code. Read that eventual
+      // result rather than treating a closed pipe as successful process exit.
+      if (exitCode === undefined && process.platform === 'win32')
+        exitCode = child._agent?.exitCode;
+      if (exited && exitCode !== undefined && !pending) break;
+      await sleep(20);
+    }
     assert(exited, 'fixture failed to exit');
     assert.equal(exitCode, 0, 'fixture exited unsuccessfully');
+    console.log(JSON.stringify({ mode, label: 'normal exit', exitCode }));
   } finally {
     // Give the owned fixture a normal exit even when an assertion fails;
     // abruptly closing a live ConPTY can hang native-host teardown.

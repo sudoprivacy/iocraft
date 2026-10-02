@@ -3,7 +3,7 @@ param(
     [Parameter(Mandatory = $true)][string]$AppPath,
     [Parameter(Mandatory = $true)][string]$FixturePath,
     [Parameter(Mandatory = $true)][string]$LogDirectory,
-    [ValidateSet('transactions', 'resize', 'rapid', 'tiny')][string]$Scenario = 'transactions'
+    [ValidateSet('transactions', 'resize', 'rapid', 'tiny', 'oversized-history')][string]$Scenario = 'transactions'
 )
 
 $ErrorActionPreference = 'Stop'
