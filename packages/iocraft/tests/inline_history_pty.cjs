@@ -36,6 +36,7 @@ delete env.NO_COLOR;
 const child = pty.spawn(path.resolve(fixture), [], { cols: 240, rows: 40,
   cwd: path.dirname(path.resolve(fixture)), env, useConpty: true, useConptyDll: mode === 'bundled' });
 let pending = 0, lastData = Date.now(), exited = false;
+let exitCode;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 function snapshot() {
   const buffer = terminal.buffer.active;
@@ -54,7 +55,7 @@ if (process.platform === 'win32') terminal.parser.registerCsiHandler({ final: 'c
   }
   return false;
 });
-child.onExit(() => { exited = true; });
+child.onExit(event => { exited = true; exitCode = event.exitCode; });
 async function settle(marker, width, notBefore = 0) {
   const start = Date.now();
   while (Date.now() - start < 15000) {
@@ -131,6 +132,7 @@ function check(label, phase, committed) {
     child.write('\x1b');
     for (let i = 0; i < 100 && !exited; i++) await sleep(20);
     assert(exited, 'fixture failed to exit');
+    assert.equal(exitCode, 0, 'fixture exited unsuccessfully');
   } finally {
     // Give the owned fixture a normal exit even when an assertion fails;
     // abruptly closing a live ConPTY can hang native-host teardown.
