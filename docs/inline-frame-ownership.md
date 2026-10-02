@@ -265,3 +265,57 @@ The experiment is retained locally as `experiment/reflow-boundary-evidence`,
 commit `189eb5a`. Its temporary worktree was removed; logs remain. The runtime
 notice, cursor classification, tail anchor, timer, precommit layout retry and
 experimental deferred-clear API are not included in this PR.
+
+### Complete history shares the live-frame transaction (2026-10-03)
+
+An additional regression first failed on `937fbf2`: complete history targeting
+the render stream was flushed between clearing the old frame and painting its
+replacement. Staging the Canvas alone did not keep that transaction together.
+The presentation owner now treats its staged erase as the initial render-stream
+segment. It flushes only at a stream switch, before a cursor query for an
+unfinished line, or at the final frame boundary. An alternate stream still
+flushes before returning to the live frame. Explicit component-clear semantics
+are unchanged. This is one shared rule, not a history-source or slot exception.
+
+The new regression checks both stdout and stderr as the render stream and
+requires the destination to remain untouched until the complete frame commits.
+All 189 local workspace tests, formatting and CI-equivalent strict Clippy pass.
+This closes a deterministic transaction defect, not the outstanding resize gap.
+The newly built fixture also passes transactions and oversized-history on both
+bundled and system ConPTY (four normal exits with code 0). Oversized history still
+reports 26 saved live rows. Strict resize still fails: bundled duplicates Status
+at 100 columns; system loses history line 43 after returning to 240 columns.
+
+### Stale geometry can erase reachable history (2026-10-03)
+
+The rejected tail/native-cursor experiment has a stronger counterexample than
+residue. A real bundled-ConPTY trace recorded a recovery plan sampled at 100
+columns, needing an 11-row rewind. By the time its bytes reached xterm, the
+frontend was 240 columns and only six rows separated the cursor and live start.
+`CSI 11 F` followed by erase therefore reached into history. Repeating this race
+lost numbered history even with no saved-line purge. A later successful footer
+does not repair or excuse the lost history.
+
+A deterministic xterm-only replay isolates that sequence: shrinking and growing
+alone preserve every line; one complete synchronized clear/paint write then
+removes history lines 68 and 69 plus the three committed history lines. It fails
+the preservation assertion intentionally and is a diagnostic, not a passing
+test or a replacement for real PTY coverage. It also proves that removing
+mid-frame flushes alone cannot make stale geometry safe.
+
+The research driver now collects traces in memory and dumps them at shutdown
+to avoid synchronous file I/O in the race. Six traced 17 ms interleaving runs
+on the old candidate gave three passes, two history-loss failures and one
+visible-duplicate failure. Keeping same-stream history in the frame batch gave
+four passes, one history-loss failure and one acknowledgment timeout in six
+more runs. Load and instrumentation affect timing; these are counterexamples,
+not statistically controlled performance comparisons. Neither candidate is
+accepted or deployed. The runtime recovery notice is still experimental.
+
+The next geometry design must account for a second owner: a frontend can resize
+before the application's backend sees that size, or before queued output arrives.
+A successful native cursor query and matching application-side sizes do not
+establish that the erase will execute in that same geometry generation. Avoid
+claiming an atomic resize transaction from batching or synchronized output:
+[the synchronized-output protocol](https://contour-terminal.org/vt-extensions/synchronized-output/)
+defers visible painting, while the emulator continues interpreting input.

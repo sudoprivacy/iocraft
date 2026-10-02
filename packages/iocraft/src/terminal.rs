@@ -961,6 +961,41 @@ mod tests {
     }
 
     #[test]
+    fn complete_same_stream_history_stays_in_the_live_frame_batch() {
+        for output in [Output::Stdout, Output::Stderr] {
+            let (dest, bytes) = new_test_writer();
+            let (mut term, _) = Terminal::mock(MockTerminalConfig::default());
+            term.inner = Box::new(new_inline_term(dest, 0));
+            term.output = output;
+            term.synchronized_update(|term| {
+                term.begin_frame()?;
+                term.present(Canvas::new(10, 2))?;
+                term.end_frame()
+            })
+            .unwrap();
+            bytes.lock().unwrap().clear();
+            term.presentation.enqueue([match output {
+                Output::Stdout => HistoryMessage::Stdout("CommittedOutput".into()),
+                Output::Stderr => HistoryMessage::Stderr("CommittedOutput".into()),
+            }]);
+            term.synchronized_update(|term| {
+                term.begin_frame()?;
+                term.present(element!(Text(content: "NewFrame")).render(Some(10)))?;
+                term.end_frame()?;
+                assert!(
+                    bytes.lock().unwrap().is_empty(),
+                    "same-stream history must not expose an erased or partial frame"
+                );
+                Ok(())
+            })
+            .unwrap();
+            let text = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+            assert!(text.find("CommittedOutput").unwrap() < text.find("NewFrame").unwrap());
+            assert!(text.ends_with("\x1b[?2026l"));
+        }
+    }
+
+    #[test]
     fn frame_writer_defers_canvas_flush_until_explicit_boundary() {
         let (dest, bytes) = new_test_writer();
         let mut writer = FrameWriter::new(Box::new(dest));

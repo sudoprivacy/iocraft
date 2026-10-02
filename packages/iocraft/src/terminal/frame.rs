@@ -81,14 +81,15 @@ impl PresentationState {
                 .queue(cursor::MoveUp(1))?
                 .queue(cursor::MoveToColumn(column))?;
         }
-        // The erase must reach the terminal before output on the other stream.
-        backend.flush_dest()?;
         let newline = if backend.is_raw_mode_enabled() {
             "\r\n"
         } else {
             "\n"
         };
-        let mut last_stream = None;
+        // Erase/cursor commands are staged on the render stream. Keep complete
+        // history on that stream in the same batch as the replacement live
+        // frame; only a stream switch or a cursor query requires a barrier.
+        let mut last_stream = Some(output);
         for message in self.pending.drain(..) {
             let (stream, text, append_newline) = message.into_parts();
             if let Some(previous) = last_stream.filter(|previous| *previous != stream) {
@@ -104,7 +105,7 @@ impl PresentationState {
             }
             last_stream = Some(stream);
         }
-        if let Some(stream) = last_stream {
+        if let Some(stream) = last_stream.filter(|stream| *stream != output || unfinished) {
             flush_history_stream(backend, output, stream)?;
         }
         if unfinished {
