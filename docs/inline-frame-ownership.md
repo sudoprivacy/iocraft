@@ -172,7 +172,7 @@ with verified content loss. The rapid-then-slow Status duplication above was
 reproduced after receiving the matching new Footer acknowledgment.
 
 Remaining before delivery: verified region recovery, an explicit layout height
-budget, removal of the existing oversized-canvas scrollback-purge fallback, and
+budget, and
 non-destructive reporting when old live rows are no longer addressable. The
 small-window folding/scrolling policy still needs the application's decision.
 
@@ -195,7 +195,7 @@ workflow on both backends. Explicit `resize` runs failed on both backends and th
 wrapper returned a nonzero exit code while preserving each backend's diagnostics.
 This confirms that the runner does not hide a failed acceptance scenario.
 
-Pull requests and main pushes run `transactions`. Manual dispatch also accepts
+Pull requests and main pushes run `transactions` and `oversized-history`. Manual dispatch also accepts
 `resize`, `rapid` and `tiny`; they retain their failing assertions and fail the job
 when the defect is reproduced. A green transaction job establishes only the
 history-transaction behavior above. Full resize acceptance remains required before
@@ -205,3 +205,19 @@ To run the same wrapper locally, provide the pinned Code executable, its
 `resources/app` directory, the newly built fixture executable and a dedicated log
 directory to `packages/iocraft/tests/run_inline_history_pty.ps1`. Select an optional
 `-Scenario resize`, `rapid` or `tiny` to run the corresponding diagnostic.
+
+### Preserve history when the live frame exceeds the viewport
+
+Closing a live panel taller than the window previously sent both display erase
+and saved-line purge (`CSI 3 J`). That deleted shell history preceding iocraft.
+The fallback now erases only the visible display. Real PTY verification opens a
+60-line panel, closes it, and checks the startup sentinel, all 70 history lines,
+three committed output lines, the draft, and a successful process exit.
+Both ConPTY backends lost the sentinel before the change and preserved history
+after it on Windows build 26300. There were still 26 stale panel rows in scrollback;
+this test reports that count and does not establish full frame recovery.
+
+The pinned node-pty can emit its public exit event on pipe close before its native
+callback records an exit code. The driver waits for that native result when the
+event carries no code; an absent result still fails. Local negative controls with
+`IOCRAFT_FIXTURE_EXIT_CODE=7` failed on both backends with the actual code 7.

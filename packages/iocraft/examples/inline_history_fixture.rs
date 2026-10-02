@@ -8,6 +8,7 @@ fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let (second, _) = hooks.use_output();
     let mut phase = hooks.use_state(|| 0_u32);
     let mut acknowledgment = hooks.use_state(|| 0_u32);
+    let mut expanded = hooks.use_state(|| false);
     let mut value = hooks.use_state(String::new);
     let mut done = hooks.use_state(|| false);
     let mut system = hooks.use_context_mut::<SystemContext>();
@@ -38,6 +39,14 @@ fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     phase.set(5);
                 }
                 KeyCode::F(6) => acknowledgment.set(acknowledgment.get() + 1),
+                KeyCode::F(7) => {
+                    expanded.set(true);
+                    phase.set(7);
+                }
+                KeyCode::F(8) => {
+                    expanded.set(false);
+                    phase.set(8);
+                }
                 KeyCode::Esc => done.set(true),
                 _ => {}
             }
@@ -48,6 +57,9 @@ fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     }
     element! {
         View(flex_direction: FlexDirection::Column) {
+            #(expanded.get().then(|| element! {
+                Text(content: "Expanded live content\n".repeat(60))
+            }))
             Text(content: format!("StatusMarker phase={} {}", phase.get(), "long status ".repeat(8)))
             Text(content: "TodoMarker 1 todos (1 done, 0 open)")
             Text(content: "─".repeat(width as usize))
@@ -67,4 +79,7 @@ fn main() {
         println!("Earlier history line {index}");
     }
     smol::block_on(element!(Fixture).render_loop()).unwrap();
+    if let Ok(code) = std::env::var("IOCRAFT_FIXTURE_EXIT_CODE") {
+        std::process::exit(code.parse().expect("integer fixture exit code"));
+    }
 }

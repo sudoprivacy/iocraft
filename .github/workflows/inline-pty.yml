@@ -11,7 +11,7 @@ on:
         required: true
         default: transactions
         type: choice
-        options: [transactions, resize, rapid, tiny]
+        options: [transactions, resize, rapid, tiny, oversized-history]
 
 permissions:
   contents: read
@@ -60,6 +60,18 @@ jobs:
             -FixturePath './target/debug/examples/inline_history_fixture.exe' `
             -LogDirectory (Join-Path $env:RUNNER_TEMP 'inline-pty-logs') `
             -Scenario $env:PTY_SCENARIO
+      - name: Preserve history when a live panel exceeds the viewport
+        if: ${{ (inputs.scenario || 'transactions') != 'oversized-history' }}
+        shell: pwsh
+        run: |
+          $terminal = Join-Path $env:RUNNER_TEMP 'inline-pty-vscode'
+          $app = Join-Path $terminal "$($env:VSCODE_COMMIT.Substring(0, 10))/resources/app"
+          ./packages/iocraft/tests/run_inline_history_pty.ps1 `
+            -CodePath (Join-Path $terminal 'Code.exe') `
+            -AppPath $app `
+            -FixturePath './target/debug/examples/inline_history_fixture.exe' `
+            -LogDirectory (Join-Path $env:RUNNER_TEMP 'inline-pty-logs/oversized-history') `
+            -Scenario oversized-history
       - name: Retain terminal output and wire traces
         if: always()
         uses: actions/upload-artifact@v4

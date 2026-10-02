@@ -298,11 +298,11 @@ impl TerminalImpl for StdTerminal<'_> {
 
         if let Some(size) = self.size {
             if self.prev_canvas_height >= size.1 {
-                // We have to clear the entire terminal to avoid leaving artifacts.
-                // See: https://github.com/ccbrown/iocraft/issues/118
+                // Only the visible display is addressable. Saved lines may
+                // include shell output from before this application started;
+                // never purge them to remove an offscreen live-frame artifact.
                 self.dest
                     .queue(terminal::Clear(terminal::ClearType::All))?
-                    .queue(terminal::Clear(terminal::ClearType::Purge))?
                     .queue(cursor::MoveTo(0, 0))?;
                 return Ok(());
             }
