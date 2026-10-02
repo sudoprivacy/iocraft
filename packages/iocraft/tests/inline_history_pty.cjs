@@ -37,10 +37,26 @@ const child = pty.spawn(path.resolve(fixture), [], { cols: 240, rows: 40,
   cwd: path.dirname(path.resolve(fixture)), env, useConpty: true, useConptyDll: mode === 'bundled' });
 let pending = 0, lastData = Date.now(), exited = false;
 let exitCode;
+let lastResize;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 function snapshot() {
   const buffer = terminal.buffer.active;
   return Array.from({ length: buffer.length }, (_, i) => buffer.getLine(i).translateToString(true)).join('\n');
+}
+// Observe the host buffer on both sides of frontend resize, before requesting
+// the child resize. This distinguishes host reflow from application repaint;
+// these coordinates are diagnostic evidence, not a runtime geometry oracle.
+function geometry(stage) {
+  const buffer = terminal.buffer.active;
+  const statusRows = [];
+  for (let row = 0; row < buffer.length; row++) {
+    if (buffer.getLine(row).translateToString(true).includes('StatusMarker')) statusRows.push(row);
+  }
+  const result = { stage, cols: terminal.cols, rows: terminal.rows, baseY: buffer.baseY,
+    cursor: [buffer.cursorX, buffer.baseY + buffer.cursorY], statusRows,
+    statusRowsInScrollback: statusRows.filter(row => row < buffer.baseY) };
+  trace({ geometry: result });
+  return result;
 }
 child.onData(data => {
   trace({ data });
@@ -70,7 +86,8 @@ async function settle(marker, width, notBefore = 0) {
 function check(label, phase, committed) {
   const text = snapshot();
   for (const marker of ['ShellHistoryBeforeScode', 'StatusMarker', 'TodoMarker', 'FooterMarker', 'DraftSurvives']) {
-    assert.equal(text.split(marker).length - 1, 1, `${label}: ${marker}\n${text}`);
+    assert.equal(text.split(marker).length - 1, 1,
+      `${label}: ${marker}\nresize geometry: ${JSON.stringify(lastResize)}\n${text}`);
   }
   assert(text.includes(`StatusMarker phase=${phase}`), `${label}: stale status phase\n${text}`);
   const lines = text.split('\n');
@@ -104,13 +121,17 @@ function check(label, phase, committed) {
     if (resize) {
       let acknowledgment = 0;
       function resizeTo(cols, rows) {
+        const before = geometry('before frontend resize');
         trace({ resize: [cols, rows] });
-        terminal.resize(cols, rows); child.resize(cols, rows);
+        terminal.resize(cols, rows);
+        lastResize = { before, afterFrontend: geometry('after frontend resize, before child resize') };
+        child.resize(cols, rows);
       }
       async function acknowledge(cols, rows) {
         const started = Date.now();
         child.write('\x1b[17~'); // F6: must be processed after the resize request.
         await settle(`FooterMarker p5 a${++acknowledgment} ${cols}x${rows}`, cols, started);
+        lastResize.afterRedraw = geometry('after acknowledged redraw');
       }
       const matrix = [[100,40], [240,40], [60,40], [240,40], [60,18], [240,40]];
       if (resize === 'rapid') {
