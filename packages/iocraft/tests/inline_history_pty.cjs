@@ -6,6 +6,7 @@
 // as a passing regression. IOCRAFT_WIRE_TRACE optionally saves fixture VT bytes.
 const path = require('node:path');
 const fs = require('node:fs');
+const os = require('node:os');
 const assert = require('node:assert/strict');
 const modules = process.env.IOCRAFT_TERMINAL_MODULES;
 const fromHost = name => require(modules ? path.join(modules, name) : name);
@@ -21,10 +22,14 @@ const trace = record => {
 };
 const terminal = new Terminal({ cols: 240, rows: 40, scrollback: 10000,
   allowProposedApi: true, reflowCursorLine: mode !== 'system',
-  windowsPty: process.platform === 'win32' ? { backend: 'conpty', buildNumber: 26200 } : undefined });
+  windowsPty: process.platform === 'win32' ? { backend: 'conpty', buildNumber: Number(os.release().split('.')[2]) } : undefined });
 const { Unicode11Addon } = fromHost('@xterm/addon-unicode11');
 terminal.loadAddon(new Unicode11Addon());
 terminal.unicode.activeVersion = '11';
+console.log(JSON.stringify({ host: { platform: process.platform, release: os.release(),
+  node: process.versions.node, electron: process.versions.electron,
+  pty: fromHost('node-pty/package.json').version,
+  xterm: fromHost('@xterm/headless/package.json').version }, mode, scenario: resize || 'transactions' }));
 const env = { ...process.env, TERM: 'xterm-256color' };
 delete env.ELECTRON_RUN_AS_NODE;
 delete env.NO_COLOR;
