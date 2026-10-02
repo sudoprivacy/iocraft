@@ -175,3 +175,33 @@ Remaining before delivery: verified region recovery, an explicit layout height
 budget, removal of the existing oversized-canvas scrollback-purge fallback, and
 non-destructive reporting when old live rows are no longer addressable. The
 small-window folding/scrolling policy still needs the application's decision.
+
+### Real PTY CI coverage
+
+`Inline PTY` builds `inline_history_fixture` and runs the history transaction
+workflow on Windows with both bundled and system ConPTY. It checks partial-line
+continuation across hooks, output ordering across streams, the input draft and
+all 70 pre-application history lines. Every run retains stdout, stderr and the
+raw terminal bytes as an artifact.
+
+The host is VS Code 1.140.0, commit
+`07f806f999227108933c2e30515b26eecc1fda74`, downloaded from Microsoft's versioned
+update endpoint and verified against the archive SHA256. The same package supplies
+Electron, node-pty and xterm. The driver reports those versions and uses the actual
+Windows build number rather than a hardcoded development-machine build.
+
+Local verification of the CI runner on Windows build 26300 passed the transaction
+workflow on both backends. Explicit `resize` runs failed on both backends and the
+wrapper returned a nonzero exit code while preserving each backend's diagnostics.
+This confirms that the runner does not hide a failed acceptance scenario.
+
+Pull requests and main pushes run `transactions`. Manual dispatch also accepts
+`resize`, `rapid` and `tiny`; they retain their failing assertions and fail the job
+when the defect is reproduced. A green transaction job establishes only the
+history-transaction behavior above. Full resize acceptance remains required before
+the renderer repair can be delivered.
+
+To run the same wrapper locally, provide the pinned Code executable, its
+`resources/app` directory, the newly built fixture executable and a dedicated log
+directory to `packages/iocraft/tests/run_inline_history_pty.ps1`. Select an optional
+`-Scenario resize`, `rapid` or `tiny` to run the corresponding diagnostic.
