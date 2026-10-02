@@ -19,8 +19,10 @@ use std::{
 };
 
 mod frame;
+mod output;
 pub(crate) use frame::HistoryMessage;
 use frame::PresentationState;
+use output::FrameWriter;
 
 // Re-exports for basic types.
 pub use crossterm::event::{KeyCode, KeyEventKind, KeyEventState, KeyModifiers, MouseEventKind};
@@ -122,6 +124,15 @@ impl Stream for TerminalEvents {
 }
 
 trait TerminalImpl: Write + Send {
+    fn begin_update(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+    fn end_update(&mut self) -> io::Result<()> {
+        self.flush()
+    }
+    fn flush_dest(&mut self) -> io::Result<()> {
+        self.dest().flush()
+    }
     fn refresh_size(&mut self) {}
     fn size(&self) -> Option<(u16, u16)> {
         None
@@ -165,7 +176,7 @@ fn clear_canvas_inline(
 
 struct StdTerminal<'a> {
     input_is_terminal: bool,
-    dest: Box<dyn Write + Send + 'a>,
+    dest: FrameWriter<'a>,
     alt: Box<dyn Write + Send + 'a>,
     fullscreen: bool,
     mouse_capture: bool,
@@ -190,6 +201,18 @@ impl Write for StdTerminal<'_> {
 }
 
 impl TerminalImpl for StdTerminal<'_> {
+    fn begin_update(&mut self) -> io::Result<()> {
+        self.dest.begin();
+        Ok(())
+    }
+
+    fn end_update(&mut self) -> io::Result<()> {
+        self.dest.finish()
+    }
+
+    fn flush_dest(&mut self) -> io::Result<()> {
+        self.dest.flush_segment()
+    }
     fn refresh_size(&mut self) {
         self.size = terminal::size().ok()
     }
@@ -285,7 +308,7 @@ impl TerminalImpl for StdTerminal<'_> {
             }
         }
 
-        clear_canvas_inline(&mut *self.dest, self.prev_canvas_height)
+        clear_canvas_inline(&mut self.dest, self.prev_canvas_height)
     }
 
     fn write_canvas(&mut self, prev: Option<&Canvas>, canvas: &Canvas) -> io::Result<()> {
@@ -297,7 +320,7 @@ impl TerminalImpl for StdTerminal<'_> {
             }
             self.prev_canvas_height = canvas.height() as _;
             self.prev_size_on_write = self.size;
-            canvas.write_ansi_without_final_newline(&mut *self.dest)?;
+            canvas.write_ansi_without_final_newline(&mut self.dest)?;
             return Ok(());
         };
 
@@ -311,7 +334,7 @@ impl TerminalImpl for StdTerminal<'_> {
                 self.clear_canvas()?;
                 self.prev_canvas_height = canvas.height() as _;
                 self.prev_size_on_write = self.size;
-                canvas.write_ansi_without_final_newline(&mut *self.dest)?;
+                canvas.write_ansi_without_final_newline(&mut self.dest)?;
                 return Ok(());
             }
 
@@ -324,7 +347,7 @@ impl TerminalImpl for StdTerminal<'_> {
                 }
                 self.dest.queue(cursor::MoveTo(0, top_row + y as u16))?;
                 if y < canvas.height() {
-                    canvas.write_ansi_row_without_newline(y, &mut *self.dest)?;
+                    canvas.write_ansi_row_without_newline(y, &mut self.dest)?;
                 } else {
                     self.dest
                         .queue(terminal::Clear(terminal::ClearType::CurrentLine))?;
@@ -357,7 +380,7 @@ impl TerminalImpl for StdTerminal<'_> {
                 if y < visible_start {
                     self.clear_canvas()?;
                     self.prev_canvas_height = canvas.height() as _;
-                    canvas.write_ansi_without_final_newline(&mut *self.dest)?;
+                    canvas.write_ansi_without_final_newline(&mut self.dest)?;
                     return Ok(());
                 }
             }
@@ -395,7 +418,7 @@ impl TerminalImpl for StdTerminal<'_> {
             current_y = y;
 
             if y < new_height {
-                canvas.write_ansi_row_without_newline(y, &mut *self.dest)?;
+                canvas.write_ansi_row_without_newline(y, &mut self.dest)?;
             } else {
                 self.dest
                     .queue(terminal::Clear(terminal::ClearType::CurrentLine))?;
@@ -456,7 +479,7 @@ impl TerminalImpl for StdTerminal<'_> {
     }
 
     fn dest(&mut self) -> &mut dyn Write {
-        &mut *self.dest
+        &mut self.dest
     }
 
     fn alt(&mut self) -> &mut dyn Write {
@@ -478,7 +501,7 @@ impl<'a> StdTerminal<'a> {
         let supports_keyboard_enhancement =
             input_is_terminal && terminal::supports_keyboard_enhancement().unwrap_or(false);
         let mut term = Self {
-            dest,
+            dest: FrameWriter::new(dest),
             alt,
             input_is_terminal,
             fullscreen,
@@ -722,7 +745,10 @@ impl<'a> Terminal<'a> {
     }
 
     pub fn clear_canvas(&mut self) -> io::Result<()> {
-        self.presentation.clear(&mut *self.inner)
+        self.presentation.clear(&mut *self.inner)?;
+        // Public ComponentUpdater::clear_terminal_output permits callers to
+        // write immediately afterward, including through the other stream.
+        self.inner.flush_dest()
     }
 
     pub fn begin_frame(&mut self) -> io::Result<()> {
@@ -753,7 +779,9 @@ impl<'a> Terminal<'a> {
         F: FnOnce(&mut Self) -> io::Result<()>,
     {
         let t = SynchronizedUpdate::begin(self)?;
-        f(t.inner)
+        let result = f(t.inner);
+        let commit = t.finish();
+        result.and(commit)
     }
 
     pub async fn wait(&mut self) -> io::Result<()> {
@@ -848,18 +876,32 @@ impl Write for Terminal<'_> {
 /// Enters synchronized update on creation, exits when dropped.
 pub(crate) struct SynchronizedUpdate<'a, 'b> {
     inner: &'a mut Terminal<'b>,
+    finished: bool,
 }
 
 impl<'a, 'b> SynchronizedUpdate<'a, 'b> {
     pub fn begin(terminal: &'a mut Terminal<'b>) -> io::Result<Self> {
+        terminal.inner.begin_update()?;
         terminal.execute(terminal::BeginSynchronizedUpdate)?;
-        Ok(Self { inner: terminal })
+        Ok(Self {
+            inner: terminal,
+            finished: false,
+        })
+    }
+
+    fn finish(mut self) -> io::Result<()> {
+        self.inner.queue(terminal::EndSynchronizedUpdate)?;
+        self.finished = true;
+        self.inner.inner.end_update()
     }
 }
 
 impl Drop for SynchronizedUpdate<'_, '_> {
     fn drop(&mut self) {
-        let _ = self.inner.execute(terminal::EndSynchronizedUpdate);
+        if !self.finished {
+            let _ = self.inner.queue(terminal::EndSynchronizedUpdate);
+            let _ = self.inner.inner.end_update();
+        }
     }
 }
 
@@ -890,6 +932,105 @@ mod tests {
         let writer = TestWriter::default();
         let buf = writer.buf.clone();
         (writer, buf)
+    }
+
+    #[test]
+    fn explicit_component_clear_reaches_wire_before_external_output() {
+        let (dest, bytes) = new_test_writer();
+        let mut external = dest.clone();
+        let (mut term, _) = Terminal::mock(MockTerminalConfig::default());
+        term.inner = Box::new(new_inline_term(dest, 0));
+        term.synchronized_update(|term| {
+            term.begin_frame()?;
+            term.present(Canvas::new(10, 2))?;
+            term.end_frame()
+        })
+        .unwrap();
+        bytes.lock().unwrap().clear();
+        term.synchronized_update(|term| {
+            term.begin_frame()?;
+            term.clear_canvas()?;
+            assert!(bytes.lock().unwrap().ends_with(b"\x1b[J"));
+            external.write_all(b"ExternalOutput\r\n")?;
+            term.present(Canvas::new(10, 1))?;
+            term.end_frame()
+        })
+        .unwrap();
+        let text = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        assert!(text.find("\x1b[J").unwrap() < text.find("ExternalOutput").unwrap());
+    }
+
+    #[test]
+    fn frame_writer_defers_canvas_flush_until_explicit_boundary() {
+        let (dest, bytes) = new_test_writer();
+        let mut writer = FrameWriter::new(Box::new(dest));
+        writer.begin();
+        Canvas::new(4, 2)
+            .write_ansi_without_final_newline(&mut writer)
+            .unwrap();
+        assert!(
+            bytes.lock().unwrap().is_empty(),
+            "Canvas must not flush half a frame"
+        );
+        writer.write_all(b"tail").unwrap();
+        writer.flush_segment().unwrap();
+        assert!(bytes.lock().unwrap().ends_with(b"tail"));
+        writer.write_all(b"next segment").unwrap();
+        assert!(!bytes.lock().unwrap().ends_with(b"next segment"));
+        writer.finish().unwrap();
+        assert!(bytes.lock().unwrap().ends_with(b"next segment"));
+    }
+
+    #[test]
+    fn synchronized_frame_returns_final_flush_error() {
+        struct FlushFailure;
+        impl Write for FlushFailure {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Err(io::Error::other("frame flush failed"))
+            }
+        }
+        let (dest, _) = new_test_writer();
+        let mut backend = new_inline_term(dest, 0);
+        backend.dest = FrameWriter::new(Box::new(FlushFailure));
+        let (mut term, _) = Terminal::mock(MockTerminalConfig::default());
+        term.inner = Box::new(backend);
+        let error = term
+            .synchronized_update(|term| term.write_all(b"frame"))
+            .unwrap_err();
+        assert_eq!(error.to_string(), "frame flush failed");
+    }
+
+    #[test]
+    fn synchronized_frame_closes_on_body_error_and_panic() {
+        for panic in [false, true] {
+            let (dest, bytes) = new_test_writer();
+            let (mut term, _) = Terminal::mock(MockTerminalConfig::default());
+            term.inner = Box::new(new_inline_term(dest, 0));
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                term.synchronized_update(|term| {
+                    term.write_all(b"partial frame")?;
+                    if panic {
+                        panic!("injected component panic");
+                    }
+                    Err(io::Error::other("injected paint error"))
+                })
+            }));
+            if panic {
+                assert!(outcome.is_err());
+            } else {
+                assert_eq!(
+                    outcome.unwrap().unwrap_err().to_string(),
+                    "injected paint error"
+                );
+            }
+            assert_eq!(
+                &*bytes.lock().unwrap(),
+                b"\x1b[?2026hpartial frame\x1b[?2026l"
+            );
+        }
     }
 
     #[test]
@@ -1099,7 +1240,7 @@ mod tests {
     ) -> StdTerminal<'static> {
         StdTerminal {
             input_is_terminal: false,
-            dest: Box::new(dest),
+            dest: FrameWriter::new(Box::new(dest)),
             alt: Box::new(io::sink()),
             fullscreen: true,
             mouse_capture: false,
@@ -1125,7 +1266,7 @@ mod tests {
     ) -> StdTerminal<'static> {
         StdTerminal {
             input_is_terminal: false,
-            dest: Box::new(dest),
+            dest: FrameWriter::new(Box::new(dest)),
             alt: Box::new(io::sink()),
             fullscreen: false,
             mouse_capture: false,

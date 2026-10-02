@@ -82,7 +82,7 @@ impl PresentationState {
                 .queue(cursor::MoveToColumn(column))?;
         }
         // The erase must reach the terminal before output on the other stream.
-        backend.dest().flush()?;
+        backend.flush_dest()?;
         let newline = if backend.is_raw_mode_enabled() {
             "\r\n"
         } else {
@@ -92,7 +92,7 @@ impl PresentationState {
         for message in self.pending.drain(..) {
             let (stream, text, append_newline) = message.into_parts();
             if let Some(previous) = last_stream.filter(|previous| *previous != stream) {
-                history_stream(backend, output, previous).flush()?;
+                flush_history_stream(backend, output, previous)?;
             }
             let writer = history_stream(backend, output, stream);
             writer.write_all(text.as_bytes())?;
@@ -105,7 +105,7 @@ impl PresentationState {
             last_stream = Some(stream);
         }
         if let Some(stream) = last_stream {
-            history_stream(backend, output, stream).flush()?;
+            flush_history_stream(backend, output, stream)?;
         }
         if unfinished {
             self.appended_newline = backend.cursor_column().ok();
@@ -114,6 +114,18 @@ impl PresentationState {
             backend.dest().write_all(newline.as_bytes())?;
         }
         Ok(())
+    }
+}
+
+fn flush_history_stream(
+    backend: &mut dyn TerminalImpl,
+    output: Output,
+    stream: Output,
+) -> io::Result<()> {
+    if output == stream {
+        backend.flush_dest()
+    } else {
+        backend.alt().flush()
     }
 }
 
