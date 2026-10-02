@@ -241,13 +241,14 @@ impl TextBuffer {
 
     fn row_start_offset(&self, offset: usize) -> usize {
         let (row, _) = self.row_column_for_offset(offset);
-        self.rows[row as usize].offset
+        self.rows.get(row as usize).map_or(0, |row| row.offset)
     }
 
     fn row_end_offset(&self, offset: usize) -> usize {
         let (row, _) = self.row_column_for_offset(offset);
-        let r = &self.rows[row as usize];
-        r.offset + r.len
+        self.rows
+            .get(row as usize)
+            .map_or(self.text.len(), |row| row.offset + row.len)
     }
 }
 
@@ -373,7 +374,10 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
         TextWrap::NoWrap
     };
 
-    let mut prev_value = hooks.use_state(|| "".to_string());
+    // The cursor always belongs to this value, including edits emitted before
+    // the controlled parent has rendered again. Do not infer local cursor
+    // movements from a frame-old value after a whole batch of input events.
+    let mut cursor_value = hooks.use_state(|| "".to_string());
     let mut cursor_offset = hooks.use_state(|| 0usize);
     let mut requested_cursor_offset = hooks.use_state(|| None);
     let mut new_cursor_offset_hint = hooks.use_state(|| NewCursorOffsetHint::None);
@@ -414,9 +418,9 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
     );
 
     // Update the cursor position if the value has changed.
-    if props.value.as_str() != prev_value.read().as_str() {
+    if props.value.as_str() != cursor_value.read().as_str() {
         let new_cursor_offset = new_cursor_offset(
-            &prev_value.read(),
+            &cursor_value.read(),
             cursor_offset.get(),
             &props.value,
             new_cursor_offset_hint.get(),
@@ -424,10 +428,10 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
         if cursor_offset != new_cursor_offset {
             cursor_offset.set(new_cursor_offset);
         }
-        prev_value.set(props.value.clone());
-        if new_cursor_offset_hint.get() != NewCursorOffsetHint::None {
-            new_cursor_offset_hint.set(NewCursorOffsetHint::None);
-        }
+        cursor_value.set(props.value.clone());
+    }
+    if new_cursor_offset_hint.get() != NewCursorOffsetHint::None {
+        new_cursor_offset_hint.set(NewCursorOffsetHint::None);
     }
 
     // Update the cursor position if the user requested it.
@@ -482,15 +486,31 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
     }
 
     hooks.use_terminal_events({
-        let buffer = buffer.clone();
+        let mut buffer = buffer.clone();
+        let mut buffer_dirty = false;
         let mut value = props.value.clone();
-        let mut temp_cursor_offset = cursor_offset.get();
+        let mut event_cursor = cursor_offset.get();
         let mut on_change = props.on_change.take();
         let mut on_paste = props.on_paste.take();
         move |event| {
             if !has_focus {
                 return;
             }
+
+            // Editing and navigation share one working value/cursor for the
+            // entire event batch. Rewrap lazily, only when a movement needs
+            // geometry after an edit (never once per typed character).
+            if buffer_dirty
+                && matches!(&event, TerminalEvent::Key(KeyEvent { code, modifiers, .. })
+                    if matches!(code, KeyCode::Left | KeyCode::Right | KeyCode::Up
+                        | KeyCode::Down | KeyCode::Home | KeyCode::End)
+                        || (modifiers.contains(KeyModifiers::CONTROL)
+                            && matches!(code, KeyCode::Char('a' | 'e'))))
+            {
+                buffer = Arc::new(TextBuffer::new(value.clone(), max_text_width as _));
+                buffer_dirty = false;
+            }
+            let mut text_changed = false;
 
             match event {
                 TerminalEvent::Key(KeyEvent {
@@ -503,11 +523,11 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
                 {
                     match code {
                         KeyCode::Char('a') => {
-                            cursor_offset.set(buffer.row_start_offset(cursor_offset.get()));
+                            event_cursor = buffer.row_start_offset(event_cursor);
                             vertical_movement_col_preference.set(None);
                         }
                         KeyCode::Char('e') => {
-                            cursor_offset.set(buffer.row_end_offset(cursor_offset.get()));
+                            event_cursor = buffer.row_end_offset(event_cursor);
                             vertical_movement_col_preference.set(None);
                         }
                         _ => {}
@@ -525,67 +545,60 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
 
                     match code {
                         KeyCode::Char(c) => {
-                            value.insert(temp_cursor_offset, c);
-                            temp_cursor_offset += c.len_utf8();
-                            on_change(value.clone());
+                            value.insert(event_cursor, c);
+                            event_cursor += c.len_utf8();
+                            text_changed = true;
                         }
                         KeyCode::Backspace => {
-                            if temp_cursor_offset > 0 {
-                                temp_cursor_offset -= value[..temp_cursor_offset]
-                                    .chars()
-                                    .last()
-                                    .unwrap()
-                                    .len_utf8();
-                                value.remove(temp_cursor_offset);
+                            if event_cursor > 0 {
+                                event_cursor -=
+                                    value[..event_cursor].chars().last().unwrap().len_utf8();
+                                value.remove(event_cursor);
                             }
-                            on_change(value.clone());
+                            text_changed = true;
                             new_cursor_offset_hint.set(NewCursorOffsetHint::Backspace);
                         }
                         KeyCode::Delete => {
-                            if temp_cursor_offset < value.len() {
-                                value.remove(temp_cursor_offset);
+                            if event_cursor < value.len() {
+                                value.remove(event_cursor);
                             }
-                            on_change(value.clone());
+                            text_changed = true;
                             new_cursor_offset_hint.set(NewCursorOffsetHint::Deletion);
                         }
                         KeyCode::Enter if multiline => {
-                            value.insert(temp_cursor_offset, '\n');
-                            temp_cursor_offset += 1;
-                            on_change(value.clone());
+                            value.insert(event_cursor, '\n');
+                            event_cursor += 1;
+                            text_changed = true;
                         }
                         KeyCode::Left => {
-                            cursor_offset.set(buffer.left_of_offset(cursor_offset.get()));
+                            event_cursor = buffer.left_of_offset(event_cursor);
                         }
                         KeyCode::Right => {
-                            cursor_offset.set(buffer.right_of_offset(cursor_offset.get()));
+                            event_cursor = buffer.right_of_offset(event_cursor);
                         }
                         KeyCode::Up if multiline => {
                             clear_vertical_movement_col_preference = false;
                             if vertical_movement_col_preference.get().is_none() {
-                                let (_, col) = buffer.row_column_for_offset(cursor_offset.get());
+                                let (_, col) = buffer.row_column_for_offset(event_cursor);
                                 vertical_movement_col_preference.set(Some(col));
                             }
-                            cursor_offset.set(buffer.above_offset(
-                                cursor_offset.get(),
-                                vertical_movement_col_preference.get(),
-                            ));
+                            event_cursor = buffer
+                                .above_offset(event_cursor, vertical_movement_col_preference.get());
                         }
                         KeyCode::Down if multiline => {
                             clear_vertical_movement_col_preference = false;
                             if vertical_movement_col_preference.get().is_none() {
-                                let (_, col) = buffer.row_column_for_offset(cursor_offset.get());
+                                let (_, col) = buffer.row_column_for_offset(event_cursor);
                                 vertical_movement_col_preference.set(Some(col));
                             }
-                            cursor_offset.set(buffer.below_offset(
-                                cursor_offset.get(),
-                                vertical_movement_col_preference.get(),
-                            ));
+                            event_cursor = buffer
+                                .below_offset(event_cursor, vertical_movement_col_preference.get());
                         }
                         KeyCode::Home => {
-                            cursor_offset.set(buffer.row_start_offset(cursor_offset.get()));
+                            event_cursor = buffer.row_start_offset(event_cursor);
                         }
                         KeyCode::End => {
-                            cursor_offset.set(buffer.row_end_offset(cursor_offset.get()));
+                            event_cursor = buffer.row_end_offset(event_cursor);
                         }
                         _ => {
                             clear_vertical_movement_col_preference = false;
@@ -605,14 +618,22 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
                     } else {
                         // Default: insert pasted text literally at cursor.
                         // Newlines are \n — NOT submit signals.
-                        for c in text.chars() {
-                            value.insert(temp_cursor_offset, c);
-                            temp_cursor_offset += c.len_utf8();
-                        }
-                        on_change(value.clone());
+                        value.insert_str(event_cursor, &text);
+                        event_cursor += text.len();
+                        text_changed = true;
+                        vertical_movement_col_preference.set(None);
                     }
                 }
                 _ => {}
+            }
+
+            if cursor_offset != event_cursor {
+                cursor_offset.set(event_cursor);
+            }
+            if text_changed {
+                buffer_dirty = true;
+                cursor_value.set(value.clone());
+                on_change(value.clone());
             }
         }
     });
@@ -779,6 +800,91 @@ mod tests {
     }
 
     #[apply(test!)]
+    async fn navigation_and_edits_share_the_same_event_batch_cursor() {
+        // An immediately-ready stream deliberately delivers the entire burst
+        // before a render. No timer/frame boundary may be required for editing.
+        let actual = element!(MyComponent(initial_value: "abcdef"))
+            .mock_terminal_render_loop(MockTerminalConfig::with_events(futures::stream::iter(
+                [
+                    KeyCode::Home,
+                    KeyCode::Right,
+                    KeyCode::Char('X'),
+                    KeyCode::Left,
+                    KeyCode::Delete,
+                    KeyCode::End,
+                    KeyCode::Backspace,
+                    KeyCode::Home,
+                    KeyCode::Char('!'),
+                ]
+                .into_iter()
+                .map(|code| TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, code))),
+            )))
+            .map(|canvas| canvas.to_string())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(actual.last().unwrap(), " !abcde\n");
+    }
+
+    #[apply(test!)]
+    async fn navigation_uses_text_inserted_earlier_in_the_event_batch() {
+        let actual = element!(MyMultilineComponent)
+            .mock_terminal_render_loop(MockTerminalConfig::with_events(futures::stream::iter([
+                TerminalEvent::Paste("ab\n界c".to_string()),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Home)),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Right)),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Backspace)),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Up)),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char('!'))),
+            ])))
+            .map(|canvas| canvas.to_string())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(actual.last().unwrap(), " !ab\n c\n\n");
+    }
+
+    #[apply(test!)]
+    async fn empty_input_accepts_navigation_before_typing() {
+        let actual = element!(MyComponent)
+            .mock_terminal_render_loop(MockTerminalConfig::with_events(futures::stream::iter(
+                [KeyCode::Home, KeyCode::End, KeyCode::Char('!')]
+                    .into_iter()
+                    .map(|code| TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, code))),
+            )))
+            .map(|canvas| canvas.to_string())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(actual.last().unwrap(), " ! \n");
+    }
+
+    #[apply(test!)]
+    async fn event_batch_cursor_survives_the_controlled_parent_render() {
+        let (events, receiver) = futures::channel::mpsc::unbounded();
+        let mut app = element!(MyComponent(initial_value: "abcd"));
+        let frames = app.mock_terminal_render_loop(MockTerminalConfig::with_events(receiver));
+        futures::pin_mut!(frames);
+        until_screen(frames.as_mut(), " abcd").await;
+        for code in [
+            KeyCode::Home,
+            KeyCode::Right,
+            KeyCode::Char('X'),
+            KeyCode::Left,
+        ] {
+            events
+                .unbounded_send(TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, code)))
+                .unwrap();
+        }
+        until_screen(frames.as_mut(), " aXbcd").await;
+        // The cursor is before X, not at the old cursor plus a guessed delta.
+        events
+            .unbounded_send(TerminalEvent::Key(KeyEvent::new(
+                KeyEventKind::Press,
+                KeyCode::Char('!'),
+            )))
+            .unwrap();
+        until_screen(frames.as_mut(), " a!Xbcd").await;
+    }
+
+    #[apply(test!)]
     async fn test_text_input_overflow() {
         let actual = element!(MyComponent)
             .mock_terminal_render_loop(MockTerminalConfig::with_events(futures::stream::iter(
@@ -871,43 +977,43 @@ mod tests {
         let frames = app.mock_terminal_render_loop(MockTerminalConfig::with_events(receiver));
         futures::pin_mut!(frames);
 
-        async fn until(
-            mut frames: std::pin::Pin<&mut impl futures::Stream<Item = Canvas>>,
-            expected: &str,
-        ) -> String {
-            smol::future::or(
-                async {
-                    while let Some(frame) = frames.next().await {
-                        let screen = frame.to_string();
-                        if screen.trim_end() == expected {
-                            return screen;
-                        }
-                    }
-                    panic!("frame stream ended before {expected:?}");
-                },
-                async {
-                    smol::Timer::after(std::time::Duration::from_secs(2)).await;
-                    panic!("layout failed to settle without a key: {expected:?}");
-                },
-            )
-            .await
-        }
-
         events.unbounded_send(TerminalEvent::Resize(12, 1)).unwrap();
-        until(frames.as_mut(), "charlie").await;
+        until_screen(frames.as_mut(), "charlie").await;
         events.unbounded_send(TerminalEvent::Resize(12, 4)).unwrap();
-        until(frames.as_mut(), "alpha\nbravo\ncharlie").await;
+        until_screen(frames.as_mut(), "alpha\nbravo\ncharlie").await;
         events.unbounded_send(TerminalEvent::Resize(6, 5)).unwrap();
-        until(frames.as_mut(), "alpha\nbravo\ncharl\nie").await;
+        until_screen(frames.as_mut(), "alpha\nbravo\ncharl\nie").await;
         events.unbounded_send(TerminalEvent::Resize(12, 4)).unwrap();
-        until(frames.as_mut(), "alpha\nbravo\ncharlie").await;
+        until_screen(frames.as_mut(), "alpha\nbravo\ncharlie").await;
         events
             .unbounded_send(TerminalEvent::Key(KeyEvent::new(
                 KeyEventKind::Press,
                 KeyCode::Char('!'),
             )))
             .unwrap();
-        until(frames.as_mut(), "alpha\nbravo\ncharlie!").await;
+        until_screen(frames.as_mut(), "alpha\nbravo\ncharlie!").await;
+    }
+
+    async fn until_screen(
+        mut frames: std::pin::Pin<&mut impl futures::Stream<Item = Canvas>>,
+        expected: &str,
+    ) -> String {
+        smol::future::or(
+            async {
+                while let Some(frame) = frames.next().await {
+                    let screen = frame.to_string();
+                    if screen.trim_end() == expected {
+                        return screen;
+                    }
+                }
+                panic!("frame stream ended before {expected:?}");
+            },
+            async {
+                smol::Timer::after(std::time::Duration::from_secs(2)).await;
+                panic!("input failed to settle without another key: {expected:?}");
+            },
+        )
+        .await
     }
 
     #[test]
