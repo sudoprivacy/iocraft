@@ -370,6 +370,8 @@ impl<'a> Tree<'a> {
     }
 
     fn render(&mut self, max_width: Option<usize>, terminal: Option<&mut Terminal<'_>>) -> Canvas {
+        let terminal_size =
+            crate::context::TerminalSizeSnapshot(terminal.as_ref().and_then(|term| term.size()));
         let mut wrapper_child_node_ids = vec![self.root_component.node_id()];
         {
             let mut context = UpdateContext {
@@ -377,11 +379,16 @@ impl<'a> Tree<'a> {
                 layout_engine: &mut self.layout_engine,
             };
             let mut component_context_stack = ContextStack::root(&mut self.system_context);
-            self.root_component.update(
-                &mut context,
-                &mut wrapper_child_node_ids,
-                &mut component_context_stack,
-                self.root_component_props.borrow(),
+            component_context_stack.with_context(
+                Some(crate::Context::from_ref(&terminal_size)),
+                |component_context_stack| {
+                    self.root_component.update(
+                        &mut context,
+                        &mut wrapper_child_node_ids,
+                        component_context_stack,
+                        self.root_component_props.borrow(),
+                    );
+                },
             );
         }
         self.layout_engine

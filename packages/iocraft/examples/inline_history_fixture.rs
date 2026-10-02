@@ -3,10 +3,11 @@ use iocraft::prelude::*;
 
 #[component]
 fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
-    let (width, _) = hooks.use_terminal_size();
+    let (width, height) = hooks.use_terminal_size();
     let (first, first_error) = hooks.use_output();
     let (second, _) = hooks.use_output();
     let mut phase = hooks.use_state(|| 0_u32);
+    let mut acknowledgment = hooks.use_state(|| 0_u32);
     let mut value = hooks.use_state(String::new);
     let mut done = hooks.use_state(|| false);
     let mut system = hooks.use_context_mut::<SystemContext>();
@@ -36,6 +37,7 @@ fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     first_error.println("StderrSuffix");
                     phase.set(5);
                 }
+                KeyCode::F(6) => acknowledgment.set(acknowledgment.get() + 1),
                 KeyCode::Esc => done.set(true),
                 _ => {}
             }
@@ -54,7 +56,7 @@ fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 TextInput(value: value.to_string(), has_focus: true, on_change: move |v| value.set(v))
             }
             Text(content: "─".repeat(width as usize))
-            Text(content: "FooterMarker")
+            Text(content: format!("FooterMarker p{} a{} {width}x{height}", phase.get(), acknowledgment.get()))
         }
     }
 }

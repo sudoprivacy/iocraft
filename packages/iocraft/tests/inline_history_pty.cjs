@@ -1,8 +1,11 @@
 // Real-PTY history transaction regression. On Windows this may run with
 // ELECTRON_RUN_AS_NODE=1 using VS Code's matching node-pty/xterm modules.
 // IOCRAFT_TERMINAL_MODULES points at node_modules (or node_modules.asar).
-// Usage: node inline_history_pty.cjs <fixture.exe> [bundled|system] [resize]
+// Usage: node inline_history_pty.cjs <fixture.exe> [bundled|system] [resize|rapid|tiny]
+// Resize modes are acceptance diagnostics; a failing run must not be reported
+// as a passing regression. IOCRAFT_WIRE_TRACE optionally saves fixture VT bytes.
 const path = require('node:path');
+const fs = require('node:fs');
 const assert = require('node:assert/strict');
 const modules = process.env.IOCRAFT_TERMINAL_MODULES;
 const fromHost = name => require(modules ? path.join(modules, name) : name);
@@ -10,6 +13,12 @@ const pty = fromHost('node-pty');
 const { Terminal } = fromHost('@xterm/headless');
 const [fixture, mode = 'bundled', resize] = process.argv.slice(2);
 assert(fixture, 'pass an explicitly built fixture executable');
+assert(['bundled', 'system'].includes(mode), `unknown backend: ${mode}`);
+assert(!resize || ['resize', 'rapid', 'tiny'].includes(resize), `unknown scenario: ${resize}`);
+const trace = record => {
+  if (process.env.IOCRAFT_WIRE_TRACE)
+    fs.appendFileSync(process.env.IOCRAFT_WIRE_TRACE, JSON.stringify({ time: Date.now(), ...record }) + '\n');
+};
 const terminal = new Terminal({ cols: 240, rows: 40, scrollback: 10000,
   allowProposedApi: true, reflowCursorLine: mode !== 'system',
   windowsPty: process.platform === 'win32' ? { backend: 'conpty', buildNumber: 26200 } : undefined });
@@ -28,6 +37,7 @@ function snapshot() {
   return Array.from({ length: buffer.length }, (_, i) => buffer.getLine(i).translateToString(true)).join('\n');
 }
 child.onData(data => {
+  trace({ data });
   lastData = Date.now(); pending++;
   terminal.write(data, () => pending--);
 });
@@ -53,9 +63,10 @@ async function settle(marker, width, notBefore = 0) {
 }
 function check(label, phase, committed) {
   const text = snapshot();
-  for (const marker of ['ShellHistoryBeforeScode', `StatusMarker phase=${phase}`, 'TodoMarker', 'FooterMarker', 'DraftSurvives']) {
+  for (const marker of ['ShellHistoryBeforeScode', 'StatusMarker', 'TodoMarker', 'FooterMarker', 'DraftSurvives']) {
     assert.equal(text.split(marker).length - 1, 1, `${label}: ${marker}\n${text}`);
   }
+  assert(text.includes(`StatusMarker phase=${phase}`), `${label}: stale status phase\n${text}`);
   const lines = text.split('\n');
   for (let index = 0; index < 70; index++) {
     assert.equal(lines.filter(line => line === `Earlier history line ${index}`).length, 1,
@@ -67,28 +78,48 @@ function check(label, phase, committed) {
 }
 (async () => {
   try {
-    await settle('StatusMarker phase=0');
+    await settle('FooterMarker p0 a0 240x40');
     child.write('DraftSurvives');
     await settle('DraftSurvives');
     check('initial', 0, []);
     child.write('\x1bOQ'); // F2, first hook leaves an unfinished line.
-    await settle('StatusMarker phase=2');
+    await settle('FooterMarker p2 a0 240x40');
     check('partial', 2, ['SharedPartial']);
     child.write('\x1bOR'); // F3, independent hook must continue that line.
-    await settle('StatusMarker phase=3');
+    await settle('FooterMarker p3 a0 240x40');
     check('cross-hook continuation', 3, ['SharedPartialJoined']);
     child.write('\x1bOS'); // F4, two hook batches in one frame.
-    await settle('StatusMarker phase=4');
+    await settle('FooterMarker p4 a0 240x40');
     check('same-frame batches', 4, ['SharedPartialJoined', 'SameBatch:end']);
     child.write('\x1b[15~'); // F5, buffered stdout followed by stderr.
-    await settle('StatusMarker phase=5');
+    await settle('FooterMarker p5 a0 240x40');
     const committed = ['SharedPartialJoined', 'SameBatch:end', 'StdoutPrefix:StderrSuffix'];
     check('cross-stream order', 5, committed);
     if (resize) {
-      for (const [cols, rows] of [[100,40], [240,40], [60,40], [240,40], [60,18], [240,40]]) {
-        const started = Date.now();
+      let acknowledgment = 0;
+      function resizeTo(cols, rows) {
+        trace({ resize: [cols, rows] });
         terminal.resize(cols, rows); child.resize(cols, rows);
-        await settle('StatusMarker phase=5', cols, started);
+      }
+      async function acknowledge(cols, rows) {
+        const started = Date.now();
+        child.write('\x1b[17~'); // F6: must be processed after the resize request.
+        await settle(`FooterMarker p5 a${++acknowledgment} ${cols}x${rows}`, cols, started);
+      }
+      const matrix = [[100,40], [240,40], [60,40], [240,40], [60,18], [240,40]];
+      if (resize === 'rapid') {
+        for (const [cols, rows] of matrix) {
+          resizeTo(cols, rows);
+          await sleep(5);
+        }
+        await acknowledge(240, 40);
+        check('rapid resize', 5, committed);
+      }
+      // A subsequent slow round trip also detects latent corruption left by
+      // a rapid round trip whose final dimensions matched its initial ones.
+      for (const [cols, rows] of resize === 'tiny' ? [[30,8], [240,40]] : matrix) {
+        resizeTo(cols, rows);
+        await acknowledge(cols, rows);
         check(`resize ${cols}x${rows}`, 5, committed);
       }
     }

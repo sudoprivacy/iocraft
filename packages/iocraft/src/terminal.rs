@@ -591,6 +591,7 @@ struct MockTerminal {
     output: mpsc::UnboundedSender<Canvas>,
     dummy_dest: io::Sink,
     dummy_alt: io::Sink,
+    size: Arc<Mutex<Option<(u16, u16)>>>,
 }
 
 impl MockTerminal {
@@ -603,6 +604,7 @@ impl MockTerminal {
                 output: output_tx,
                 dummy_dest: io::sink(),
                 dummy_alt: io::sink(),
+                size: Arc::new(Mutex::new(None)),
             },
             output,
         )
@@ -620,6 +622,10 @@ impl Write for MockTerminal {
 }
 
 impl TerminalImpl for MockTerminal {
+    fn size(&self) -> Option<(u16, u16)> {
+        *self.size.lock().unwrap()
+    }
+
     fn is_raw_mode_enabled(&self) -> bool {
         false
     }
@@ -636,7 +642,16 @@ impl TerminalImpl for MockTerminal {
     fn event_stream(&mut self) -> io::Result<BoxStream<'static, io::Result<TerminalEvent>>> {
         let mut events = stream::pending().boxed();
         mem::swap(&mut events, &mut self.config.events);
-        Ok(events.map(Ok).chain(stream::pending()).boxed())
+        let size = self.size.clone();
+        Ok(events
+            .inspect(move |event| {
+                if let TerminalEvent::Resize(columns, rows) = event {
+                    *size.lock().unwrap() = Some((*columns, *rows));
+                }
+            })
+            .map(Ok)
+            .chain(stream::pending())
+            .boxed())
     }
 
     fn dest(&mut self) -> &mut dyn Write {

@@ -116,3 +116,62 @@ with that reply and reproduced the same loss. The native Windows screen-buffer
 view is also not always the frontend's view: with bundled ConPTY after widening,
 the native Status row remains 28 while xterm displays it at 33. A Windows cursor
 or screen-read query alone is therefore not an authoritative frontend boundary.
+
+### Shared frame dimensions and rapid-resize follow-up
+
+Further tracing found a second ownership defect: after coalescing several resize
+notifications, the layout engine used 240 columns while `use_terminal_size`
+still returned 100 columns from its independently queued event state. The frame
+therefore contained 100-column separators on a 240-column Canvas. This does not
+depend on the Todo or Status implementation.
+
+The renderer now supplies one immutable `TerminalSizeSnapshot` to the component
+tree. All size hooks read that sample, which is also used for layout. Resize
+events still wake components; their stored dimensions are only a fallback when
+no terminal snapshot exists. The context is separate from `SystemContext`, so
+holding a mutable system-context borrow cannot make the dimensions unavailable.
+Mock terminals now update their geometry when emitting a resize, allowing tests
+to assert both the hook's value and the Canvas width. There is no added timer,
+new dependency, slot ordering change or per-keystroke history replay in this slice.
+
+Local validation: 179 workspace tests pass, including snapshot changes without
+intervening events and sibling hooks with a borrowed `SystemContext`. Formatting,
+CI-equivalent strict Clippy and warnings-as-errors documentation build pass.
+
+The independent tail-anchor experiment completed 50 additional slow bundled-
+ConPTY runs (20 with application tracing and 30 without application tracing,
+both with wire tracing), but still failed rapid resizing. A 35 ms resize-only
+coalescing experiment avoided the immediate rapid-case duplication, yet a
+subsequent slow resize to 60x40 exposed a duplicate Status row. Adding the shared
+size snapshot and a sticky observed-size invalidation flag did not eliminate
+that later failure. None of that tail, timer or invalidation experiment is part
+of this PR. Earlier missing-Footer reports need revalidation with the complete-
+frame acknowledgment below; they cannot independently establish a renderer loss.
+
+Raw VT traces show a 100-column frame reaching the frontend after it was already
+resized to 60 columns. Thus application size coherence is necessary but does not
+establish a reliable post-reflow boundary by itself. Windows' own ConPTY cursor
+resynchronization work also acknowledges that frontend and backend reflow can
+diverge: [Microsoft Terminal #19535](https://github.com/microsoft/terminal/pull/19535).
+That upstream change is not a substitute for our acceptance tests.
+
+The PTY driver now accepts `rapid` and `tiny` as well as `resize`. After resizing,
+F6 requests a new fixture acknowledgment containing the observed dimensions;
+checks wait for that acknowledgment, not only a width-matching separator. Count
+all Status markers, including stale phases. The rapid case includes a subsequent
+slow matrix to expose latent corruption. `IOCRAFT_WIRE_TRACE` optionally records
+the fixture's bytes and resize requests for diagnosis. These resize scenarios
+remain failing acceptance diagnostics, not expected-failure tests declared green.
+
+The same completeness rule now applies to non-resize history transactions:
+wait for the new phase in the Footer, which is painted last. During concurrent
+builds a 250 ms quiet interval occurred mid-frame and the old driver reported
+missing Footer before the rest of the bytes arrived. A startup timeout was also
+recorded in that run. Retain those logs, but do not confuse an incomplete sample
+with verified content loss. The rapid-then-slow Status duplication above was
+reproduced after receiving the matching new Footer acknowledgment.
+
+Remaining before delivery: verified region recovery, an explicit layout height
+budget, removal of the existing oversized-canvas scrollback-purge fallback, and
+non-destructive reporting when old live rows are no longer addressable. The
+small-window folding/scrolling policy still needs the application's decision.
