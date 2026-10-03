@@ -15,6 +15,9 @@ pub struct MixedTextContent {
     /// The color to make the text.
     pub color: Option<Color>,
 
+    /// The background color behind this section's terminal cells.
+    pub background_color: Option<Color>,
+
     /// The weight of the text.
     pub weight: Weight,
 
@@ -212,9 +215,19 @@ impl Component for MixedText {
                     invert: content.invert,
                 };
                 if segments.peek().is_some() {
-                    drawer.append_lines([segment.text], style, content.hyperlink.as_deref());
+                    drawer.append_lines_with_background(
+                        [segment.text],
+                        style,
+                        content.hyperlink.as_deref(),
+                        content.background_color,
+                    );
                 } else {
-                    drawer.append_lines([segment.text, ""], style, content.hyperlink.as_deref());
+                    drawer.append_lines_with_background(
+                        [segment.text, ""],
+                        style,
+                        content.hyperlink.as_deref(),
+                        content.background_color,
+                    );
                 }
             }
         }
@@ -224,6 +237,45 @@ impl Component for MixedText {
 #[cfg(test)]
 mod tests {
     use crate::prelude::*;
+
+    #[test]
+    fn mixed_backgrounds_survive_wrap_without_coloring_following_text() {
+        let mut added = MixedTextContent::new("abcd");
+        added.background_color = Some(Color::Rgb {
+            r: 33,
+            g: 58,
+            b: 43,
+        });
+        let mut removed = MixedTextContent::new("efgh");
+        removed.background_color = Some(Color::Rgb {
+            r: 74,
+            g: 34,
+            b: 29,
+        });
+        let canvas = element! {
+            View(width: 4) {
+                MixedText(contents: vec![added, MixedTextContent::new(" "), removed, MixedTextContent::new(" tail")])
+            }
+        }.render(None);
+        assert_eq!(
+            canvas.cell(0, 0).unwrap().background_color,
+            Some(Color::Rgb {
+                r: 33,
+                g: 58,
+                b: 43
+            })
+        );
+        assert_eq!(
+            canvas.cell(0, 1).unwrap().background_color,
+            Some(Color::Rgb {
+                r: 74,
+                g: 34,
+                b: 29
+            })
+        );
+        assert_eq!(canvas.cell(0, 2).unwrap().background_color, None);
+        assert_eq!(canvas.get_text(0, 2, 4, 1), "tail");
+    }
 
     #[test]
     fn test_mixed_text() {
