@@ -48,6 +48,19 @@ pub struct TextInputHandle {
     inner: Option<TextInputHandleInner>,
 }
 
+/// A replacement value and its byte cursor position for an input event.
+pub struct TextInputEdit {
+    /// The complete replacement text.
+    pub value: String,
+    /// The cursor offset in bytes. Out-of-range offsets are clamped to a UTF-8 boundary.
+    pub cursor_offset: usize,
+}
+
+/// Handles an application edit against the current value and cursor, including
+/// earlier events in the same input batch. Return `None` for normal input handling.
+pub type TextInputEditHandler =
+    Box<dyn FnMut(&TerminalEvent, &str, usize) -> Option<TextInputEdit> + Send + Sync + 'static>;
+
 struct TextInputHandleInner {
     cursor_offset: State<usize>,
     requested_cursor_offset: State<Option<usize>>,
@@ -101,6 +114,14 @@ pub struct TextInputProps {
     /// The handler to invoke when the value changes.
     pub on_change: HandlerMut<'static, String>,
 
+    /// Optional editing callback, called before built-in key and paste handling.
+    ///
+    /// Use this for shortcuts or transformed pastes that change the text. The
+    /// returned replacement is applied before the next queued event and reported
+    /// through `on_change`. Returning `None` preserves the default behavior.
+    /// The callback borrows the current text; ordinary keys need no extra copy.
+    pub on_edit: Option<TextInputEditHandler>,
+
     /// Optional handler for bracketed-paste events.
     ///
     /// When provided, the component forwards the raw pasted string to this
@@ -108,6 +129,8 @@ pub struct TextInputProps {
     /// buffer.  The caller is responsible for updating `value` (and for any
     /// placeholder substitution).  When `None`, the default behaviour applies:
     /// pasted text is inserted literally at the cursor (newlines become `\n`).
+    /// For transformed pastes that must stay ordered with subsequent queued
+    /// typing, return the replacement through [`Self::on_edit`] instead.
     pub on_paste: HandlerMut<'static, String>,
 
     /// If true, the input will fill 100% of the height of its container and handle multiline input.
@@ -491,6 +514,7 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
         let mut event_cursor = cursor_offset.get();
         let mut on_change = props.on_change.take();
         let mut on_paste = props.on_paste.take();
+        let mut on_edit = props.on_edit.take();
         move |event| {
             if !has_focus {
                 return;
@@ -498,6 +522,34 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
             // Edit the cursor's owning value in place. The controlled-parent
             // callback needs one clone, not a second full draft copy per key.
             let mut value = cursor_value.write();
+
+            let editable_event = match &event {
+                TerminalEvent::Paste(_) => true,
+                TerminalEvent::Key(KeyEvent { kind, .. }) => *kind != KeyEventKind::Release,
+                _ => false,
+            };
+            if editable_event {
+                if let Some(edit) = on_edit
+                    .as_mut()
+                    .and_then(|handler| handler(&event, &value, event_cursor))
+                {
+                    *value = edit.value;
+                    event_cursor = edit.cursor_offset.min(value.len());
+                    while !value.is_char_boundary(event_cursor) {
+                        event_cursor -= 1;
+                    }
+                    let next_value = value.clone();
+                    drop(value);
+                    buffer_dirty = true;
+                    vertical_movement_col_preference.set(None);
+                    new_cursor_offset_hint.set(NewCursorOffsetHint::None);
+                    if cursor_offset != event_cursor {
+                        cursor_offset.set(event_cursor);
+                    }
+                    on_change(next_value);
+                    return;
+                }
+            }
 
             // Editing and navigation share one working value/cursor for the
             // entire event batch. Rewrap lazily, only when a movement needs
