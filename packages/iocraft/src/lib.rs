@@ -142,6 +142,10 @@ pub use flattened_exports::*;
 /// `taffy` dependency to your `Cargo.toml`.
 pub use taffy;
 
+/// Query terminal colors before starting the render loop, retaining keyboard
+/// input in the same event queue used by the loop.
+pub use crossterm::terminal::default_colors as query_terminal_colors;
+
 /// Components for crafting your UI.
 pub mod components;
 
