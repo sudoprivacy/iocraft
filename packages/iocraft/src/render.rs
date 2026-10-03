@@ -515,6 +515,16 @@ impl<'a> Tree<'a> {
             if self.system_context.should_exit() || term.received_ctrl_c() {
                 break;
             }
+            let tasks = self.system_context.take_terminal_tasks();
+            if !tasks.is_empty() {
+                for task in tasks {
+                    term.suspend(task)?;
+                }
+                prev_canvas = None;
+                // Redraw immediately at the external program's final cursor
+                // position, including when there are no new terminal events.
+                continue;
+            }
             if let Either::Right((result, _)) =
                 select(self.root_component.wait().boxed(), term.wait().boxed()).await
             {
@@ -661,6 +671,35 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert_eq!(error.to_string(), "input failed");
+    }
+
+    #[component]
+    fn HandoffComponent(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let mut count = hooks.use_state(|| 0);
+        hooks.use_terminal_events(move |_| count += 1);
+        if count == 0 {
+            system.suspend(move || count.set(1));
+        } else if count == 2 {
+            system.exit();
+        }
+        element!(Text(content: count.to_string()))
+    }
+
+    #[apply(test!)]
+    async fn test_terminal_handoff_preserves_hooks_and_event_subscriptions() {
+        let events = futures::stream::iter([crate::TerminalEvent::Key(crate::KeyEvent::new(
+            crate::KeyEventKind::Press,
+            crate::KeyCode::Char('x'),
+        ))]);
+        let canvases: Vec<_> = mock_terminal_render_loop(
+            &mut element!(HandoffComponent),
+            MockTerminalConfig::with_events(events),
+        )
+        .collect()
+        .await;
+        let actual: Vec<_> = canvases.iter().map(|canvas| canvas.to_string()).collect();
+        assert_eq!(actual, ["0\n", "1\n", "2\n"]);
     }
 
     #[component]
