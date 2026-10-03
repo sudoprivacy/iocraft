@@ -190,7 +190,13 @@ impl Component for MixedText {
 
         let mut drawer = TextDrawer::new(drawer, x_offset, self.align != TextAlign::Left);
         for (mut line, padding) in lines.into_iter().zip(paddings) {
-            if self.wrap == TextWrap::Wrap {
+            // Painted trailing cells are part of a diff/selection surface.
+            // Trimming them would erase its fill on shorter wrapped rows.
+            let painted_tail = line
+                .segments
+                .last()
+                .is_some_and(|segment| self.contents[segment.index].background_color.is_some());
+            if self.wrap == TextWrap::Wrap && !painted_tail {
                 line.trim_end();
             }
 
@@ -275,6 +281,16 @@ mod tests {
         );
         assert_eq!(canvas.cell(0, 2).unwrap().background_color, None);
         assert_eq!(canvas.get_text(0, 2, 4, 1), "tail");
+        let mut padded = MixedTextContent::new("ab  ");
+        padded.background_color = Some(Color::DarkGreen);
+        let canvas = element! {
+            View(width: 4) { MixedText(contents: vec![padded]) }
+        }
+        .render(None);
+        assert_eq!(
+            canvas.cell(3, 0).unwrap().background_color,
+            Some(Color::DarkGreen)
+        );
     }
 
     #[test]
