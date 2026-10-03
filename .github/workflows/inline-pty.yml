@@ -1,0 +1,91 @@
+name: Inline PTY
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: 'Resize scenarios remain failing acceptance diagnostics'
+        required: true
+        default: transactions
+        type: choice
+        options: [transactions, resize, rapid, tiny, oversized-history]
+
+permissions:
+  contents: read
+
+jobs:
+  inline-history:
+    name: Windows inline history (${{ inputs.scenario || 'transactions' }})
+    runs-on: windows-2025
+    timeout-minutes: 20
+    env:
+      VSCODE_COMMIT: 07f806f999227108933c2e30515b26eecc1fda74
+      VSCODE_ARCHIVE_SHA256: 52f47072473375767d63ea5be9ffb96a3092124223fe5ce036834a299715014e
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the real terminal fixture
+        run: cargo build -p iocraft --example inline_history_fixture --example input_ownership_fixture
+      - name: Cache the pinned terminal host
+        id: terminal-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/inline-pty-vscode
+          key: inline-pty-windows-x64-${{ env.VSCODE_COMMIT }}
+      - name: Download the pinned terminal host
+        if: steps.terminal-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'inline-pty-vscode.zip'
+          $uri = "https://update.code.visualstudio.com/commit:$env:VSCODE_COMMIT/win32-x64-archive/stable"
+          Invoke-WebRequest -Uri $uri -OutFile $archive
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $env:VSCODE_ARCHIVE_SHA256) {
+            throw 'VS Code archive checksum mismatch'
+          }
+          Expand-Archive -LiteralPath $archive -DestinationPath (Join-Path $env:RUNNER_TEMP 'inline-pty-vscode')
+      - name: Exercise both ConPTY backends
+        shell: pwsh
+        env:
+          PTY_SCENARIO: ${{ inputs.scenario || 'transactions' }}
+        run: |
+          $terminal = Join-Path $env:RUNNER_TEMP 'inline-pty-vscode'
+          $app = Join-Path $terminal "$($env:VSCODE_COMMIT.Substring(0, 10))/resources/app"
+          ./packages/iocraft/tests/run_inline_history_pty.ps1 `
+            -CodePath (Join-Path $terminal 'Code.exe') `
+            -AppPath $app `
+            -FixturePath './target/debug/examples/inline_history_fixture.exe' `
+            -LogDirectory (Join-Path $env:RUNNER_TEMP 'inline-pty-logs') `
+            -Scenario $env:PTY_SCENARIO
+      - name: Preserve history when a live panel exceeds the viewport
+        if: ${{ (inputs.scenario || 'transactions') != 'oversized-history' }}
+        shell: pwsh
+        run: |
+          $terminal = Join-Path $env:RUNNER_TEMP 'inline-pty-vscode'
+          $app = Join-Path $terminal "$($env:VSCODE_COMMIT.Substring(0, 10))/resources/app"
+          ./packages/iocraft/tests/run_inline_history_pty.ps1 `
+            -CodePath (Join-Path $terminal 'Code.exe') `
+            -AppPath $app `
+            -FixturePath './target/debug/examples/inline_history_fixture.exe' `
+            -LogDirectory (Join-Path $env:RUNNER_TEMP 'inline-pty-logs/oversized-history') `
+            -Scenario oversized-history
+      - name: Keep transformed paste and shortcuts ordered with typing
+        shell: pwsh
+        run: |
+          $terminal = Join-Path $env:RUNNER_TEMP 'inline-pty-vscode'
+          $app = Join-Path $terminal "$($env:VSCODE_COMMIT.Substring(0, 10))/resources/app"
+          ./packages/iocraft/tests/run_input_ownership_pty.ps1 `
+            -CodePath (Join-Path $terminal 'Code.exe') `
+            -AppPath $app `
+            -FixturePath './target/debug/examples/input_ownership_fixture.exe' `
+            -LogDirectory (Join-Path $env:RUNNER_TEMP 'inline-pty-logs/input-ownership')
+      - name: Retain terminal output and wire traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inline-pty-${{ inputs.scenario || 'transactions' }}
+          path: ${{ runner.temp }}/inline-pty-logs/
+          if-no-files-found: warn

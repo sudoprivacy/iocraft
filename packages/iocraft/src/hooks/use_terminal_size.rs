@@ -17,13 +17,21 @@ pub trait UseTerminalSize: private::Sealed {
 
 impl UseTerminalSize for Hooks<'_, '_> {
     fn use_terminal_size(&mut self) -> (u16, u16) {
-        let mut size = self.use_state(|| terminal::size().unwrap_or((0, 0)));
+        let frame_size = self
+            .context_stack
+            .and_then(|stack| stack.get_context::<crate::context::TerminalSizeSnapshot>())
+            .and_then(|snapshot| snapshot.0);
+        let mut size =
+            self.use_state(|| frame_size.unwrap_or_else(|| terminal::size().unwrap_or((0, 0))));
         self.use_terminal_events(move |event| {
             if let TerminalEvent::Resize(width, height) = event {
                 size.set((width, height));
             }
         });
-        size.get()
+        // Events wake the component and provide a fallback outside a terminal
+        // render loop. They are not the geometry authority for a frame: queued
+        // resize events can lag behind the renderer's current size sample.
+        frame_size.unwrap_or_else(|| size.get())
     }
 }
 
@@ -54,9 +62,45 @@ mod tests {
             .mock_terminal_render_loop(MockTerminalConfig::with_events(futures::stream::iter(
                 vec![TerminalEvent::Resize(100, 40)],
             )))
-            .map(|c| c.to_string())
             .collect::<Vec<_>>()
             .await;
-        assert_eq!(actual.last().unwrap(), "100x40\n");
+        let canvas = actual.last().unwrap();
+        assert_eq!(canvas.to_string(), "100x40\n");
+        assert_eq!(canvas.width(), 100, "layout and hook share the same size");
+    }
+
+    #[test]
+    fn frame_snapshot_wins_over_hook_state_without_waiting_for_resize_events() {
+        let mut storage = Vec::new();
+        for (index, dimensions) in [(240, 40), (100, 18), (240, 40)].into_iter().enumerate() {
+            let mut snapshot = crate::context::TerminalSizeSnapshot(Some(dimensions));
+            let stack = crate::ContextStack::root(&mut snapshot);
+            let mut hooks = crate::Hooks::new(&mut storage, index == 0);
+            assert_eq!(
+                hooks.with_context_stack(&stack).use_terminal_size(),
+                dimensions,
+                "the hook's stored initial size must not override this frame"
+            );
+        }
+    }
+
+    #[test]
+    fn sibling_size_hooks_read_one_snapshot_while_system_context_is_borrowed() {
+        #[component]
+        fn Report(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+            let _system = hooks.use_context_mut::<SystemContext>();
+            let (columns, rows) = hooks.use_terminal_size();
+            element!(Text(content: format!("{columns}x{rows}")))
+        }
+
+        let canvas = element! {
+            ContextProvider(value: Context::owned(crate::context::TerminalSizeSnapshot(Some((73, 19))))) {
+                View(flex_direction: FlexDirection::Column) {
+                    Report
+                    Report
+                }
+            }
+        }.render(Some(73));
+        assert_eq!(canvas.to_string(), "73x19\n73x19\n");
     }
 }

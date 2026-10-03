@@ -18,6 +18,12 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
+mod frame;
+mod output;
+pub(crate) use frame::HistoryMessage;
+use frame::PresentationState;
+use output::FrameWriter;
+
 // Re-exports for basic types.
 pub use crossterm::event::{KeyCode, KeyEventKind, KeyEventState, KeyModifiers, MouseEventKind};
 
@@ -118,6 +124,15 @@ impl Stream for TerminalEvents {
 }
 
 trait TerminalImpl: Write + Send {
+    fn begin_update(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+    fn end_update(&mut self) -> io::Result<()> {
+        self.flush()
+    }
+    fn flush_dest(&mut self) -> io::Result<()> {
+        self.dest().flush()
+    }
     fn refresh_size(&mut self) {}
     fn size(&self) -> Option<(u16, u16)> {
         None
@@ -127,6 +142,9 @@ trait TerminalImpl: Write + Send {
     }
 
     fn is_raw_mode_enabled(&self) -> bool;
+    fn cursor_column(&mut self) -> io::Result<u16> {
+        cursor::position().map(|(column, _)| column)
+    }
     fn begin_frame(&mut self) -> io::Result<bool> {
         Ok(false)
     }
@@ -158,7 +176,7 @@ fn clear_canvas_inline(
 
 struct StdTerminal<'a> {
     input_is_terminal: bool,
-    dest: Box<dyn Write + Send + 'a>,
+    dest: FrameWriter<'a>,
     alt: Box<dyn Write + Send + 'a>,
     fullscreen: bool,
     mouse_capture: bool,
@@ -183,6 +201,18 @@ impl Write for StdTerminal<'_> {
 }
 
 impl TerminalImpl for StdTerminal<'_> {
+    fn begin_update(&mut self) -> io::Result<()> {
+        self.dest.begin();
+        Ok(())
+    }
+
+    fn end_update(&mut self) -> io::Result<()> {
+        self.dest.finish()
+    }
+
+    fn flush_dest(&mut self) -> io::Result<()> {
+        self.dest.flush_segment()
+    }
     fn refresh_size(&mut self) {
         self.size = terminal::size().ok()
     }
@@ -268,17 +298,17 @@ impl TerminalImpl for StdTerminal<'_> {
 
         if let Some(size) = self.size {
             if self.prev_canvas_height >= size.1 {
-                // We have to clear the entire terminal to avoid leaving artifacts.
-                // See: https://github.com/ccbrown/iocraft/issues/118
+                // Only the visible display is addressable. Saved lines may
+                // include shell output from before this application started;
+                // never purge them to remove an offscreen live-frame artifact.
                 self.dest
                     .queue(terminal::Clear(terminal::ClearType::All))?
-                    .queue(terminal::Clear(terminal::ClearType::Purge))?
                     .queue(cursor::MoveTo(0, 0))?;
                 return Ok(());
             }
         }
 
-        clear_canvas_inline(&mut *self.dest, self.prev_canvas_height)
+        clear_canvas_inline(&mut self.dest, self.prev_canvas_height)
     }
 
     fn write_canvas(&mut self, prev: Option<&Canvas>, canvas: &Canvas) -> io::Result<()> {
@@ -290,7 +320,7 @@ impl TerminalImpl for StdTerminal<'_> {
             }
             self.prev_canvas_height = canvas.height() as _;
             self.prev_size_on_write = self.size;
-            canvas.write_ansi_without_final_newline(&mut *self.dest)?;
+            canvas.write_ansi_without_final_newline(&mut self.dest)?;
             return Ok(());
         };
 
@@ -304,7 +334,7 @@ impl TerminalImpl for StdTerminal<'_> {
                 self.clear_canvas()?;
                 self.prev_canvas_height = canvas.height() as _;
                 self.prev_size_on_write = self.size;
-                canvas.write_ansi_without_final_newline(&mut *self.dest)?;
+                canvas.write_ansi_without_final_newline(&mut self.dest)?;
                 return Ok(());
             }
 
@@ -317,7 +347,7 @@ impl TerminalImpl for StdTerminal<'_> {
                 }
                 self.dest.queue(cursor::MoveTo(0, top_row + y as u16))?;
                 if y < canvas.height() {
-                    canvas.write_ansi_row_without_newline(y, &mut *self.dest)?;
+                    canvas.write_ansi_row_without_newline(y, &mut self.dest)?;
                 } else {
                     self.dest
                         .queue(terminal::Clear(terminal::ClearType::CurrentLine))?;
@@ -350,7 +380,7 @@ impl TerminalImpl for StdTerminal<'_> {
                 if y < visible_start {
                     self.clear_canvas()?;
                     self.prev_canvas_height = canvas.height() as _;
-                    canvas.write_ansi_without_final_newline(&mut *self.dest)?;
+                    canvas.write_ansi_without_final_newline(&mut self.dest)?;
                     return Ok(());
                 }
             }
@@ -388,7 +418,7 @@ impl TerminalImpl for StdTerminal<'_> {
             current_y = y;
 
             if y < new_height {
-                canvas.write_ansi_row_without_newline(y, &mut *self.dest)?;
+                canvas.write_ansi_row_without_newline(y, &mut self.dest)?;
             } else {
                 self.dest
                     .queue(terminal::Clear(terminal::ClearType::CurrentLine))?;
@@ -449,7 +479,7 @@ impl TerminalImpl for StdTerminal<'_> {
     }
 
     fn dest(&mut self) -> &mut dyn Write {
-        &mut *self.dest
+        &mut self.dest
     }
 
     fn alt(&mut self) -> &mut dyn Write {
@@ -471,7 +501,7 @@ impl<'a> StdTerminal<'a> {
         let supports_keyboard_enhancement =
             input_is_terminal && terminal::supports_keyboard_enhancement().unwrap_or(false);
         let mut term = Self {
-            dest,
+            dest: FrameWriter::new(dest),
             alt,
             input_is_terminal,
             fullscreen,
@@ -584,6 +614,7 @@ struct MockTerminal {
     output: mpsc::UnboundedSender<Canvas>,
     dummy_dest: io::Sink,
     dummy_alt: io::Sink,
+    size: Arc<Mutex<Option<(u16, u16)>>>,
 }
 
 impl MockTerminal {
@@ -596,6 +627,7 @@ impl MockTerminal {
                 output: output_tx,
                 dummy_dest: io::sink(),
                 dummy_alt: io::sink(),
+                size: Arc::new(Mutex::new(None)),
             },
             output,
         )
@@ -613,6 +645,10 @@ impl Write for MockTerminal {
 }
 
 impl TerminalImpl for MockTerminal {
+    fn size(&self) -> Option<(u16, u16)> {
+        *self.size.lock().unwrap()
+    }
+
     fn is_raw_mode_enabled(&self) -> bool {
         false
     }
@@ -629,7 +665,16 @@ impl TerminalImpl for MockTerminal {
     fn event_stream(&mut self) -> io::Result<BoxStream<'static, io::Result<TerminalEvent>>> {
         let mut events = stream::pending().boxed();
         mem::swap(&mut events, &mut self.config.events);
-        Ok(events.map(Ok).chain(stream::pending()).boxed())
+        let size = self.size.clone();
+        Ok(events
+            .inspect(move |event| {
+                if let TerminalEvent::Resize(columns, rows) = event {
+                    *size.lock().unwrap() = Some((*columns, *rows));
+                }
+            })
+            .map(Ok)
+            .chain(stream::pending())
+            .boxed())
     }
 
     fn dest(&mut self) -> &mut dyn Write {
@@ -643,6 +688,7 @@ impl TerminalImpl for MockTerminal {
 
 pub(crate) struct Terminal<'a> {
     inner: Box<dyn TerminalImpl + 'a>,
+    presentation: PresentationState,
     output: Output,
     event_stream: Option<BoxStream<'static, io::Result<TerminalEvent>>>,
     subscribers: Vec<Weak<Mutex<TerminalEventsInner>>>,
@@ -665,6 +711,7 @@ impl<'a> Terminal<'a> {
         };
         Ok(Self {
             inner: Box::new(StdTerminal::new(dest, alt, fullscreen, mouse_capture)?),
+            presentation: PresentationState::default(),
             output,
             event_stream: None,
             subscribers: Vec::new(),
@@ -698,44 +745,31 @@ impl<'a> Terminal<'a> {
     }
 
     pub fn clear_canvas(&mut self) -> io::Result<()> {
-        self.inner.clear_canvas()
+        self.presentation.clear(&mut *self.inner)?;
+        // Public ComponentUpdater::clear_terminal_output permits callers to
+        // write immediately afterward, including through the other stream.
+        self.inner.flush_dest()
     }
 
-    pub fn begin_frame(&mut self) -> io::Result<bool> {
-        self.inner.begin_frame()
+    pub fn begin_frame(&mut self) -> io::Result<()> {
+        self.presentation.begin_frame(&mut *self.inner)
     }
 
     pub fn end_frame(&mut self) -> io::Result<()> {
         self.inner.end_frame()
     }
 
-    pub fn write_canvas(&mut self, prev: Option<&Canvas>, canvas: &Canvas) -> io::Result<()> {
-        self.inner.write_canvas(prev, canvas)
+    pub fn present(&mut self, canvas: Canvas) -> io::Result<()> {
+        self.presentation
+            .present(&mut *self.inner, self.output, canvas)
+    }
+
+    pub fn enqueue_history(&mut self, messages: impl IntoIterator<Item = HistoryMessage>) {
+        self.presentation.enqueue(messages);
     }
 
     pub fn received_ctrl_c(&self) -> bool {
         self.received_ctrl_c
-    }
-
-    /// Returns a mutable reference to the stdout handle.
-    pub fn stdout(&mut self) -> &mut dyn Write {
-        match self.output {
-            Output::Stdout => self.inner.dest(),
-            Output::Stderr => self.inner.alt(),
-        }
-    }
-
-    /// Returns a mutable reference to the stderr handle.
-    pub fn stderr(&mut self) -> &mut dyn Write {
-        match self.output {
-            Output::Stdout => self.inner.alt(),
-            Output::Stderr => self.inner.dest(),
-        }
-    }
-
-    /// Returns a mutable reference to the render output handle (stdout or stderr based on output setting).
-    pub fn render_output(&mut self) -> &mut dyn Write {
-        self.inner.dest()
     }
 
     /// Wraps a series of terminal updates in a synchronized update block, making sure to end the
@@ -745,7 +779,9 @@ impl<'a> Terminal<'a> {
         F: FnOnce(&mut Self) -> io::Result<()>,
     {
         let t = SynchronizedUpdate::begin(self)?;
-        f(t.inner)
+        let result = f(t.inner);
+        let commit = t.finish();
+        result.and(commit)
     }
 
     pub async fn wait(&mut self) -> io::Result<()> {
@@ -807,6 +843,7 @@ impl Terminal<'static> {
         (
             Self {
                 inner: Box::new(term),
+                presentation: PresentationState::default(),
                 output: Output::Stdout,
                 event_stream: None,
                 subscribers: Vec::new(),
@@ -839,18 +876,32 @@ impl Write for Terminal<'_> {
 /// Enters synchronized update on creation, exits when dropped.
 pub(crate) struct SynchronizedUpdate<'a, 'b> {
     inner: &'a mut Terminal<'b>,
+    finished: bool,
 }
 
 impl<'a, 'b> SynchronizedUpdate<'a, 'b> {
     pub fn begin(terminal: &'a mut Terminal<'b>) -> io::Result<Self> {
+        terminal.inner.begin_update()?;
         terminal.execute(terminal::BeginSynchronizedUpdate)?;
-        Ok(Self { inner: terminal })
+        Ok(Self {
+            inner: terminal,
+            finished: false,
+        })
+    }
+
+    fn finish(mut self) -> io::Result<()> {
+        self.inner.queue(terminal::EndSynchronizedUpdate)?;
+        self.finished = true;
+        self.inner.inner.end_update()
     }
 }
 
 impl Drop for SynchronizedUpdate<'_, '_> {
     fn drop(&mut self) {
-        let _ = self.inner.execute(terminal::EndSynchronizedUpdate);
+        if !self.finished {
+            let _ = self.inner.queue(terminal::EndSynchronizedUpdate);
+            let _ = self.inner.inner.end_update();
+        }
     }
 }
 
@@ -884,6 +935,140 @@ mod tests {
     }
 
     #[test]
+    fn explicit_component_clear_reaches_wire_before_external_output() {
+        let (dest, bytes) = new_test_writer();
+        let mut external = dest.clone();
+        let (mut term, _) = Terminal::mock(MockTerminalConfig::default());
+        term.inner = Box::new(new_inline_term(dest, 0));
+        term.synchronized_update(|term| {
+            term.begin_frame()?;
+            term.present(Canvas::new(10, 2))?;
+            term.end_frame()
+        })
+        .unwrap();
+        bytes.lock().unwrap().clear();
+        term.synchronized_update(|term| {
+            term.begin_frame()?;
+            term.clear_canvas()?;
+            assert!(bytes.lock().unwrap().ends_with(b"\x1b[J"));
+            external.write_all(b"ExternalOutput\r\n")?;
+            term.present(Canvas::new(10, 1))?;
+            term.end_frame()
+        })
+        .unwrap();
+        let text = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        assert!(text.find("\x1b[J").unwrap() < text.find("ExternalOutput").unwrap());
+    }
+
+    #[test]
+    fn complete_same_stream_history_stays_in_the_live_frame_batch() {
+        for output in [Output::Stdout, Output::Stderr] {
+            let (dest, bytes) = new_test_writer();
+            let (mut term, _) = Terminal::mock(MockTerminalConfig::default());
+            term.inner = Box::new(new_inline_term(dest, 0));
+            term.output = output;
+            term.synchronized_update(|term| {
+                term.begin_frame()?;
+                term.present(Canvas::new(10, 2))?;
+                term.end_frame()
+            })
+            .unwrap();
+            bytes.lock().unwrap().clear();
+            term.presentation.enqueue([match output {
+                Output::Stdout => HistoryMessage::Stdout("CommittedOutput".into()),
+                Output::Stderr => HistoryMessage::Stderr("CommittedOutput".into()),
+            }]);
+            term.synchronized_update(|term| {
+                term.begin_frame()?;
+                term.present(element!(Text(content: "NewFrame")).render(Some(10)))?;
+                term.end_frame()?;
+                assert!(
+                    bytes.lock().unwrap().is_empty(),
+                    "same-stream history must not expose an erased or partial frame"
+                );
+                Ok(())
+            })
+            .unwrap();
+            let text = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+            assert!(text.find("CommittedOutput").unwrap() < text.find("NewFrame").unwrap());
+            assert!(text.ends_with("\x1b[?2026l"));
+        }
+    }
+
+    #[test]
+    fn frame_writer_defers_canvas_flush_until_explicit_boundary() {
+        let (dest, bytes) = new_test_writer();
+        let mut writer = FrameWriter::new(Box::new(dest));
+        writer.begin();
+        Canvas::new(4, 2)
+            .write_ansi_without_final_newline(&mut writer)
+            .unwrap();
+        assert!(
+            bytes.lock().unwrap().is_empty(),
+            "Canvas must not flush half a frame"
+        );
+        writer.write_all(b"tail").unwrap();
+        writer.flush_segment().unwrap();
+        assert!(bytes.lock().unwrap().ends_with(b"tail"));
+        writer.write_all(b"next segment").unwrap();
+        assert!(!bytes.lock().unwrap().ends_with(b"next segment"));
+        writer.finish().unwrap();
+        assert!(bytes.lock().unwrap().ends_with(b"next segment"));
+    }
+
+    #[test]
+    fn synchronized_frame_returns_final_flush_error() {
+        struct FlushFailure;
+        impl Write for FlushFailure {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Err(io::Error::other("frame flush failed"))
+            }
+        }
+        let (dest, _) = new_test_writer();
+        let mut backend = new_inline_term(dest, 0);
+        backend.dest = FrameWriter::new(Box::new(FlushFailure));
+        let (mut term, _) = Terminal::mock(MockTerminalConfig::default());
+        term.inner = Box::new(backend);
+        let error = term
+            .synchronized_update(|term| term.write_all(b"frame"))
+            .unwrap_err();
+        assert_eq!(error.to_string(), "frame flush failed");
+    }
+
+    #[test]
+    fn synchronized_frame_closes_on_body_error_and_panic() {
+        for panic in [false, true] {
+            let (dest, bytes) = new_test_writer();
+            let (mut term, _) = Terminal::mock(MockTerminalConfig::default());
+            term.inner = Box::new(new_inline_term(dest, 0));
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                term.synchronized_update(|term| {
+                    term.write_all(b"partial frame")?;
+                    if panic {
+                        panic!("injected component panic");
+                    }
+                    Err(io::Error::other("injected paint error"))
+                })
+            }));
+            if panic {
+                assert!(outcome.is_err());
+            } else {
+                assert_eq!(
+                    outcome.unwrap().unwrap_err().to_string(),
+                    "injected paint error"
+                );
+            }
+            assert_eq!(
+                &*bytes.lock().unwrap(),
+                b"\x1b[?2026hpartial frame\x1b[?2026l"
+            );
+        }
+    }
+
+    #[test]
     fn test_std_terminal() {
         // There's unfortunately not much here we can really test, but we'll do our best.
         // TODO: Is there a library we can use to emulate terminal input/output?
@@ -899,7 +1084,7 @@ mod tests {
         assert!(!terminal.received_ctrl_c());
         assert!(!terminal.is_raw_mode_enabled());
         let canvas = Canvas::new(10, 1);
-        terminal.write_canvas(None, &canvas).unwrap();
+        terminal.present(canvas).unwrap();
     }
 
     fn render_canvas_to_vt(canvas: &Canvas, cols: usize, rows: usize) -> avt::Vt {
@@ -1090,7 +1275,7 @@ mod tests {
     ) -> StdTerminal<'static> {
         StdTerminal {
             input_is_terminal: false,
-            dest: Box::new(dest),
+            dest: FrameWriter::new(Box::new(dest)),
             alt: Box::new(io::sink()),
             fullscreen: true,
             mouse_capture: false,
@@ -1116,7 +1301,7 @@ mod tests {
     ) -> StdTerminal<'static> {
         StdTerminal {
             input_is_terminal: false,
-            dest: Box::new(dest),
+            dest: FrameWriter::new(Box::new(dest)),
             alt: Box::new(io::sink()),
             fullscreen: false,
             mouse_capture: false,
@@ -1656,7 +1841,7 @@ mod tests {
             )
             .unwrap();
             let canvas = Canvas::new(10, 1);
-            terminal.write_canvas(None, &canvas).unwrap();
+            terminal.present(canvas).unwrap();
         }
 
         assert!(!stdout_buf.is_empty());
