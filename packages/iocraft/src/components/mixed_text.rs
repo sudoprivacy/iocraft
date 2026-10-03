@@ -194,7 +194,8 @@ impl Component for MixedText {
             // Trimming them would erase its fill on shorter wrapped rows.
             let painted_tail = line
                 .segments
-                .last()
+                .iter()
+                .rfind(|segment| !segment.text.is_empty())
                 .is_some_and(|segment| self.contents[segment.index].background_color.is_some());
             if self.wrap == TextWrap::Wrap && !painted_tail {
                 line.trim_end();
@@ -284,7 +285,7 @@ mod tests {
         let mut padded = MixedTextContent::new("ab  ");
         padded.background_color = Some(Color::DarkGreen);
         let canvas = element! {
-            View(width: 4) { MixedText(contents: vec![padded]) }
+            View(width: 4) { MixedText(contents: vec![padded, MixedTextContent::new("\ntail")]) }
         }
         .render(None);
         assert_eq!(
