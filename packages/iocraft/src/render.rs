@@ -26,7 +26,6 @@ use taffy::{
 pub(crate) struct UpdateContext<'a, 'w> {
     terminal: Option<&'a mut Terminal<'w>>,
     layout_engine: &'a mut LayoutEngine,
-    did_clear_terminal_output: bool,
 }
 
 /// Provides information and operations that low level component implementations may need to
@@ -76,11 +75,8 @@ impl<'a, 'b, 'c, 'w> ComponentUpdater<'a, 'b, 'c, 'w> {
     /// Removes the currently rendered output from the terminal, e.g. to allow for the printing of
     /// output above the component.
     pub fn clear_terminal_output(&mut self) {
-        if !self.context.did_clear_terminal_output {
-            if let Some(terminal) = self.context.terminal.as_mut() {
-                terminal.clear_canvas().unwrap();
-            }
-            self.context.did_clear_terminal_output = true;
+        if let Some(terminal) = self.context.terminal.as_mut() {
+            terminal.clear_canvas().unwrap();
         }
     }
 
@@ -355,11 +351,6 @@ struct Tree<'a> {
     system_context: SystemContext,
 }
 
-struct RenderOutput {
-    canvas: Canvas,
-    did_clear_terminal_output: bool,
-}
-
 impl<'a> Tree<'a> {
     fn new(mut props: AnyProps<'a>, helper: Box<dyn ComponentHelperExt>) -> Self {
         let mut layout_engine = TaffyTree::new();
@@ -378,27 +369,28 @@ impl<'a> Tree<'a> {
         }
     }
 
-    fn render(
-        &mut self,
-        max_width: Option<usize>,
-        terminal: Option<&mut Terminal<'_>>,
-    ) -> RenderOutput {
+    fn render(&mut self, max_width: Option<usize>, terminal: Option<&mut Terminal<'_>>) -> Canvas {
+        let terminal_size =
+            crate::context::TerminalSizeSnapshot(terminal.as_ref().and_then(|term| term.size()));
         let mut wrapper_child_node_ids = vec![self.root_component.node_id()];
-        let did_clear_terminal_output = {
+        {
             let mut context = UpdateContext {
                 terminal,
                 layout_engine: &mut self.layout_engine,
-                did_clear_terminal_output: false,
             };
             let mut component_context_stack = ContextStack::root(&mut self.system_context);
-            self.root_component.update(
-                &mut context,
-                &mut wrapper_child_node_ids,
-                &mut component_context_stack,
-                self.root_component_props.borrow(),
+            component_context_stack.with_context(
+                Some(crate::Context::from_ref(&terminal_size)),
+                |component_context_stack| {
+                    self.root_component.update(
+                        &mut context,
+                        &mut wrapper_child_node_ids,
+                        component_context_stack,
+                        self.root_component_props.borrow(),
+                    );
+                },
             );
-            context.did_clear_terminal_output
-        };
+        }
         self.layout_engine
             .set_children(self.wrapper_node_id, &wrapper_child_node_ids)
             .expect("we should be able to set the children");
@@ -472,36 +464,41 @@ impl<'a> Tree<'a> {
             },
         };
         self.root_component.draw(&mut drawer);
-        RenderOutput {
-            canvas,
-            did_clear_terminal_output,
-        }
+        canvas
     }
 
     async fn terminal_render_loop(&mut self, mut term: Terminal<'_>) -> io::Result<()> {
-        let mut prev_canvas: Option<Canvas> = None;
         let mut mouse_capture_enabled: Option<bool> = None;
+        let mut last_render_size = None;
         loop {
             term.refresh_size();
+            if last_render_size.is_some()
+                && (term.resize_pending() || term.size() != last_render_size)
+            {
+                loop {
+                    let before = term.size();
+                    async_io::Timer::after(std::time::Duration::from_millis(35)).await;
+                    term.refresh_size();
+                    if term.size() == before {
+                        break;
+                    }
+                }
+            }
             let terminal_size = term.size();
-            term.synchronized_update(|mut term| {
-                if term.begin_frame()? {
-                    prev_canvas = None;
-                }
-                let output = self.render(terminal_size.map(|(w, _)| w as usize), Some(&mut term));
-                if output.did_clear_terminal_output || prev_canvas.as_ref() != Some(&output.canvas)
-                {
-                    let prev = if output.did_clear_terminal_output {
-                        None
-                    } else {
-                        prev_canvas.as_ref()
-                    };
-                    term.write_canvas(prev, &output.canvas)?;
-                }
-                prev_canvas = Some(output.canvas);
+            let canvas = self.render(terminal_size.map(|(w, _)| w as usize), Some(&mut term));
+            term.refresh_size();
+            if term.size() != terminal_size {
+                // Keep component state and pending history, but do not emit
+                // cursor moves or content laid out for an obsolete viewport.
+                continue;
+            }
+            term.synchronized_update(|term| {
+                term.begin_frame()?;
+                term.present(canvas)?;
                 term.end_frame()?;
                 Ok(())
             })?;
+            last_render_size = terminal_size;
             if let Some(requested) = self.system_context.mouse_capture() {
                 if mouse_capture_enabled != Some(requested) {
                     if requested {
@@ -520,7 +517,6 @@ impl<'a> Tree<'a> {
                 for task in tasks {
                     term.suspend(task)?;
                 }
-                prev_canvas = None;
                 // Redraw immediately at the external program's final cursor
                 // position, including when there are no new terminal events.
                 continue;
@@ -541,7 +537,7 @@ impl<'a> Tree<'a> {
 pub(crate) fn render<E: ElementExt>(mut e: E, max_width: Option<usize>) -> Canvas {
     let h = e.helper();
     let mut tree = Tree::new(e.props_mut(), h);
-    tree.render(max_width, None).canvas
+    tree.render(max_width, None)
 }
 
 pub(crate) async fn terminal_render_loop<E>(e: &mut E, term: Terminal<'_>) -> io::Result<()>

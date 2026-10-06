@@ -7,6 +7,11 @@ use std::sync::Mutex;
 
 type TerminalTask = Box<dyn FnOnce() + Send>;
 
+/// Immutable dimensions sampled by the renderer for this entire update pass.
+/// Keep this separate from SystemContext: components may already hold its
+/// mutable borrow when they ask for their terminal dimensions.
+pub(crate) struct TerminalSizeSnapshot(pub Option<(u16, u16)>);
+
 /// The system context, which is always available to all components.
 pub struct SystemContext {
     should_exit: bool,

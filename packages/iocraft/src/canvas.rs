@@ -281,6 +281,29 @@ impl Canvas {
         Some(&row[..last_non_empty.map_or(0, |i| i + 1)])
     }
 
+    pub(crate) fn reflowed_height(&self, columns: usize) -> usize {
+        let columns = columns.max(1);
+        (0..self.height())
+            .map(|y| {
+                let row = self.row(y).unwrap_or(&[]);
+                let (mut source, mut column, mut rows) = (0, 0, 1);
+                while source < row.len() {
+                    let width = row[source]
+                        .character
+                        .as_ref()
+                        .map_or(1, |c| c.value.width().max(1));
+                    if column > 0 && column + width > columns {
+                        rows += 1;
+                        column = 0;
+                    }
+                    column += width;
+                    source += width;
+                }
+                rows
+            })
+            .sum()
+    }
+
     pub(crate) fn row_eq(&self, other: &Self, y: usize) -> bool {
         self.width == other.width && self.row(y) == other.row(y)
     }
