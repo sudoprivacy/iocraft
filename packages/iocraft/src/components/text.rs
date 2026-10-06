@@ -215,6 +215,16 @@ impl<'a, 'b> TextDrawer<'a, 'b> {
         // CanvasTextStyle is Copy, so passing hyperlinks separately
         hyperlink: Option<&str>,
     ) {
+        self.append_lines_with_background(lines, style, hyperlink, None);
+    }
+
+    pub fn append_lines_with_background<'c>(
+        &mut self,
+        lines: impl IntoIterator<Item = &'c str>,
+        style: CanvasTextStyle,
+        hyperlink: Option<&str>,
+        background: Option<Color>,
+    ) {
         let mut lines = lines.into_iter().peekable();
         while let Some(mut line) = lines.next() {
             if self.skip_leading_whitespace && !self.line_encountered_non_whitespace {
@@ -232,6 +242,11 @@ impl<'a, 'b> TextDrawer<'a, 'b> {
             let placed_x = self.x;
             self.drawer.canvas().set_text(placed_x, self.y, line, style);
             let w = line.width();
+            if let Some(color) = background {
+                self.drawer
+                    .canvas()
+                    .set_background_color(placed_x, self.y, w, 1, color);
+            }
             if w > 0 {
                 self.drawer.canvas().set_hyperlink(
                     placed_x,

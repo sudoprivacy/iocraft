@@ -1,5 +1,6 @@
 //! Real-PTY fixture: independent history hooks must share terminal ownership.
 use iocraft::prelude::*;
+use std::io::{self, Write};
 
 #[component]
 fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
@@ -11,6 +12,7 @@ fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut expanded = hooks.use_state(|| false);
     let mut value = hooks.use_state(String::new);
     let mut done = hooks.use_state(|| false);
+    let mut handoff = hooks.use_state(|| false);
     let mut system = hooks.use_context_mut::<SystemContext>();
     hooks.use_terminal_events(move |event| {
         if let TerminalEvent::Key(KeyEvent {
@@ -47,6 +49,7 @@ fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     expanded.set(false);
                     phase.set(8);
                 }
+                KeyCode::F(9) => handoff.set(true),
                 KeyCode::Esc => done.set(true),
                 _ => {}
             }
@@ -54,6 +57,17 @@ fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     });
     if done.get() {
         system.exit();
+    }
+    if handoff.get() {
+        handoff.set(false);
+        system.suspend(|| {
+            println!("ExternalProgramPrompt");
+            let mut line = String::new();
+            io::stdin().read_line(&mut line).unwrap();
+            // Exercise resuming after output with no final newline.
+            print!("ExternalProgramResult:{}", line.trim());
+            io::stdout().flush().unwrap();
+        });
     }
     element! {
         View(flex_direction: FlexDirection::Column) {

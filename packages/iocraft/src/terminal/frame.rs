@@ -35,6 +35,11 @@ pub(super) struct PresentationState {
 }
 
 impl PresentationState {
+    pub(super) fn release_terminal(&mut self) {
+        self.previous = None;
+        self.appended_newline = None;
+    }
+
     pub(super) fn enqueue(&mut self, messages: impl IntoIterator<Item = HistoryMessage>) {
         self.pending.extend(messages);
     }
@@ -256,6 +261,30 @@ mod tests {
         fn alt(&mut self) -> &mut dyn Write {
             &mut self.alt
         }
+    }
+
+    #[test]
+    fn terminal_handoff_invalidates_canvas_and_partial_line_but_keeps_queued_history() {
+        let mut state = PresentationState::default();
+        let mut backend = Backend::new();
+        state.enqueue([HistoryMessage::StdoutNoNewline("partial".into())]);
+        state
+            .present(&mut backend, Output::Stdout, Canvas::new(8, 1))
+            .unwrap();
+        assert_eq!(backend.take_wire(), "partial\r\n");
+        assert!(state.appended_newline.is_some());
+        state.enqueue([HistoryMessage::Stdout("after external output".into())]);
+        state.release_terminal();
+        state
+            .present(&mut backend, Output::Stdout, Canvas::new(8, 1))
+            .unwrap();
+        assert_eq!(backend.take_wire(), "after external output\r\n");
+        assert_eq!(backend.clears, 0, "do not erase external output");
+        assert_eq!(
+            backend.paints,
+            [false, false],
+            "handoff requires a full repaint"
+        );
     }
 
     #[test]

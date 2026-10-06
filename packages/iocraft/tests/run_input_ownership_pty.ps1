@@ -14,7 +14,7 @@ $env:IOCRAFT_TERMINAL_MODULES = Join-Path $AppPath 'node_modules.asar'
 New-Item -ItemType Directory -Path $LogDirectory -Force | Out-Null
 $failed = @()
 foreach ($backend in @('bundled', 'system')) {
-    foreach ($scenario in @('clear', 'paste', 'middle-paste', 'clear-paste')) {
+    foreach ($scenario in @('clear', 'paste', 'middle-paste', 'clear-paste', 'navigation', 'rendered-cursor')) {
         $prefix = Join-Path $LogDirectory "$backend-$scenario"
         $env:IOCRAFT_WIRE_TRACE = "$prefix-wire.jsonl"
         [System.IO.File]::WriteAllText($env:IOCRAFT_WIRE_TRACE, '')

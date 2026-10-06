@@ -11,7 +11,7 @@ on:
         required: true
         default: transactions
         type: choice
-        options: [transactions, resize, rapid, tiny, oversized-history]
+        options: [transactions, resize, rapid, tiny, oversized-history, handoff]
 
 permissions:
   contents: read
@@ -29,7 +29,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build the real terminal fixture
-        run: cargo build -p iocraft --example inline_history_fixture --example input_ownership_fixture
+        run: cargo build -p iocraft --example inline_history_fixture
       - name: Cache the pinned terminal host
         id: terminal-cache
         uses: actions/cache@v4
@@ -72,16 +72,18 @@ jobs:
             -FixturePath './target/debug/examples/inline_history_fixture.exe' `
             -LogDirectory (Join-Path $env:RUNNER_TEMP 'inline-pty-logs/oversized-history') `
             -Scenario oversized-history
-      - name: Keep transformed paste and shortcuts ordered with typing
+      - name: Preserve history and repaint after external terminal ownership
+        if: ${{ (inputs.scenario || 'transactions') != 'handoff' }}
         shell: pwsh
         run: |
           $terminal = Join-Path $env:RUNNER_TEMP 'inline-pty-vscode'
           $app = Join-Path $terminal "$($env:VSCODE_COMMIT.Substring(0, 10))/resources/app"
-          ./packages/iocraft/tests/run_input_ownership_pty.ps1 `
+          ./packages/iocraft/tests/run_inline_history_pty.ps1 `
             -CodePath (Join-Path $terminal 'Code.exe') `
             -AppPath $app `
-            -FixturePath './target/debug/examples/input_ownership_fixture.exe' `
-            -LogDirectory (Join-Path $env:RUNNER_TEMP 'inline-pty-logs/input-ownership')
+            -FixturePath './target/debug/examples/inline_history_fixture.exe' `
+            -LogDirectory (Join-Path $env:RUNNER_TEMP 'inline-pty-logs/handoff') `
+            -Scenario handoff
       - name: Retain terminal output and wire traces
         if: always()
         uses: actions/upload-artifact@v4

@@ -3,6 +3,9 @@ use core::{
     cell::{Ref, RefCell, RefMut},
     mem,
 };
+use std::sync::Mutex;
+
+type TerminalTask = Box<dyn FnOnce() + Send>;
 
 /// Immutable dimensions sampled by the renderer for this entire update pass.
 /// Keep this separate from SystemContext: components may already hold its
@@ -13,6 +16,7 @@ pub(crate) struct TerminalSizeSnapshot(pub Option<(u16, u16)>);
 pub struct SystemContext {
     should_exit: bool,
     mouse_capture: Option<bool>,
+    terminal_tasks: Mutex<Vec<TerminalTask>>,
 }
 
 impl SystemContext {
@@ -20,6 +24,7 @@ impl SystemContext {
         Self {
             should_exit: false,
             mouse_capture: None,
+            terminal_tasks: Mutex::new(Vec::new()),
         }
     }
 
@@ -41,6 +46,25 @@ impl SystemContext {
 
     pub(crate) fn mouse_capture(&self) -> Option<bool> {
         self.mouse_capture
+    }
+
+    /// Runs a callback with exclusive access to the terminal after the current
+    /// render pass. Rendering and event reading pause, the live canvas is
+    /// removed, and cooked input and the visible cursor are restored. The
+    /// component tree and hook state survive; rendering resumes after return.
+    ///
+    /// Use this to run an external editor or pager. The callback runs on the
+    /// render thread and must not wait for work on that same thread. Callbacks
+    /// are not run by static rendering, or if releasing the terminal fails.
+    pub fn suspend<F: FnOnce() + Send + 'static>(&mut self, callback: F) {
+        self.terminal_tasks
+            .get_mut()
+            .unwrap()
+            .push(Box::new(callback));
+    }
+
+    pub(crate) fn take_terminal_tasks(&mut self) -> Vec<TerminalTask> {
+        mem::take(self.terminal_tasks.get_mut().unwrap())
     }
 }
 

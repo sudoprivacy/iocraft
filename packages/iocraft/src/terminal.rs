@@ -154,6 +154,19 @@ trait TerminalImpl: Write + Send {
     fn clear_canvas(&mut self) -> io::Result<()>;
     fn write_canvas(&mut self, prev: Option<&Canvas>, canvas: &Canvas) -> io::Result<()>;
     fn event_stream(&mut self) -> io::Result<BoxStream<'static, io::Result<TerminalEvent>>>;
+    fn suspend_events(
+        &mut self,
+        events: &mut Option<BoxStream<'static, io::Result<TerminalEvent>>>,
+    ) {
+        // EventStream's Drop must join its input worker before returning.
+        drop(events.take());
+    }
+    fn suspend(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+    fn resume(&mut self) -> io::Result<()> {
+        Ok(())
+    }
     fn dest(&mut self) -> &mut dyn Write;
     fn alt(&mut self) -> &mut dyn Write;
 }
@@ -213,6 +226,40 @@ impl TerminalImpl for StdTerminal<'_> {
     fn flush_dest(&mut self) -> io::Result<()> {
         self.dest.flush_segment()
     }
+
+    fn suspend(&mut self) -> io::Result<()> {
+        self.refresh_size();
+        self.begin_frame()?;
+        if self.fullscreen {
+            self.dest.queue(terminal::LeaveAlternateScreen)?;
+        } else if self.prev_canvas_height > 0 {
+            // Only the visible live rows are owned. Never purge scrollback
+            // when the canvas is taller than the viewport.
+            let height = self.size.map_or(self.prev_canvas_height, |(_, rows)| {
+                self.prev_canvas_height.min(rows.max(1))
+            });
+            clear_canvas_inline(&mut self.dest, height)?;
+        }
+        self.prev_canvas_height = 0;
+        self.prev_size_on_write = None;
+        self.inline_anchored = false;
+        self.set_raw_mode_enabled(false)?;
+        self.dest.execute(cursor::Show)?;
+        Ok(())
+    }
+
+    fn resume(&mut self) -> io::Result<()> {
+        self.refresh_size();
+        if self.fullscreen {
+            self.dest.queue(terminal::EnterAlternateScreen)?;
+        } else {
+            // External programs need not end their output with a newline.
+            self.dest.write_all(b"\r\n")?;
+        }
+        self.dest.execute(cursor::Hide)?;
+        Ok(())
+    }
+
     fn refresh_size(&mut self) {
         self.size = terminal::size().ok()
     }
@@ -649,6 +696,14 @@ impl TerminalImpl for MockTerminal {
         *self.size.lock().unwrap()
     }
 
+    fn suspend_events(
+        &mut self,
+        _events: &mut Option<BoxStream<'static, io::Result<TerminalEvent>>>,
+    ) {
+        // Mock events have no background stdin reader. Keep the scripted
+        // stream so events following the callback are still delivered.
+    }
+
     fn is_raw_mode_enabled(&self) -> bool {
         false
     }
@@ -730,6 +785,27 @@ impl<'a> Terminal<'a> {
 
     pub fn ignore_ctrl_c(&mut self) {
         self.ignore_ctrl_c = true;
+    }
+
+    pub fn suspend(&mut self, callback: impl FnOnce()) -> io::Result<()> {
+        let had_events = self.event_stream.is_some();
+        self.inner.suspend_events(&mut self.event_stream);
+        self.inner.suspend()?;
+        // External output owns the terminal until resume. Neither the old
+        // canvas nor a partial history line is a valid position afterward,
+        // even when the callback panics or the next canvas is identical.
+        self.presentation.release_terminal();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
+        let resumed = self.inner.resume().and_then(|()| {
+            if had_events && self.event_stream.is_none() {
+                self.event_stream = Some(self.inner.event_stream()?);
+            }
+            Ok(())
+        });
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+        resumed
     }
 
     pub fn is_raw_mode_enabled(&self) -> bool {
@@ -1085,6 +1161,78 @@ mod tests {
         assert!(!terminal.is_raw_mode_enabled());
         let canvas = Canvas::new(10, 1);
         terminal.present(canvas).unwrap();
+    }
+
+    #[test]
+    fn test_handoff_repaints_identical_inline_canvas_even_after_panic() {
+        for panics in [false, true] {
+            let (writer, bytes) = new_test_writer();
+            let mut external = writer.clone();
+            let (mut term, _) = Terminal::mock(MockTerminalConfig::default());
+            term.inner = Box::new(new_inline_term(writer, 0));
+            let canvas = element!(Text(content: "SameFrame")).render(Some(10));
+            term.synchronized_update(|term| {
+                term.begin_frame()?;
+                term.present(canvas.clone())?;
+                term.end_frame()
+            })
+            .unwrap();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                term.suspend(|| {
+                    external.write_all(b"ExternalResult").unwrap();
+                    assert!(!panics, "external operation failed");
+                })
+                .unwrap();
+            }));
+            assert_eq!(result.is_err(), panics);
+            term.synchronized_update(|term| {
+                term.begin_frame()?;
+                term.present(canvas)?;
+                term.end_frame()
+            })
+            .unwrap();
+            let output = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+            assert_eq!(output.matches("SameFrame").count(), 2);
+            let resumed = output.split_once("ExternalResult").unwrap().1;
+            assert!(resumed.contains("SameFrame"));
+            assert!(
+                !resumed.contains("\x1b[J"),
+                "external output is not owned UI"
+            );
+        }
+    }
+
+    #[test]
+    fn test_handoff_restores_inline_terminal_after_callback_panics() {
+        let (writer, bytes) = new_test_writer();
+        let mut term = Terminal::new(
+            Box::new(writer),
+            Box::new(io::sink()),
+            Output::Stdout,
+            false,
+            false,
+        )
+        .unwrap();
+        term.present(Canvas::new(10, 2)).unwrap();
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = term.suspend(|| panic!("external operation failed"));
+        }));
+        assert!(panic.is_err());
+        let bytes = bytes.lock().unwrap();
+        let output = String::from_utf8_lossy(&bytes);
+        assert!(output.contains("\x1b[?25h"), "handoff must show the cursor");
+        assert!(
+            output.ends_with("\r\n\x1b[?25l"),
+            "resume must start a fresh inline frame"
+        );
+        assert!(
+            !output.contains("\x1b[3J"),
+            "handoff must preserve scrollback"
+        );
+        assert!(
+            !output.contains("1049"),
+            "inline handoff must not switch screens"
+        );
     }
 
     fn render_canvas_to_vt(canvas: &Canvas, cols: usize, rows: usize) -> avt::Vt {

@@ -1,7 +1,7 @@
 // Real-PTY history transaction regression. On Windows this may run with
 // ELECTRON_RUN_AS_NODE=1 using VS Code's matching node-pty/xterm modules.
 // IOCRAFT_TERMINAL_MODULES points at node_modules (or node_modules.asar).
-// Usage: node inline_history_pty.cjs <fixture.exe> [bundled|system] [resize|rapid|tiny|oversized-history]
+// Usage: node inline_history_pty.cjs <fixture.exe> [bundled|system] [resize|rapid|tiny|oversized-history|handoff]
 // Resize modes are acceptance diagnostics; a failing run must not be reported
 // as a passing regression. IOCRAFT_WIRE_TRACE optionally saves fixture VT bytes.
 const path = require('node:path');
@@ -15,7 +15,7 @@ const { Terminal } = fromHost('@xterm/headless');
 const [fixture, mode = 'bundled', resize] = process.argv.slice(2);
 assert(fixture, 'pass an explicitly built fixture executable');
 assert(['bundled', 'system'].includes(mode), `unknown backend: ${mode}`);
-assert(!resize || ['resize', 'rapid', 'tiny', 'oversized-history'].includes(resize), `unknown scenario: ${resize}`);
+assert(!resize || ['resize', 'rapid', 'tiny', 'oversized-history', 'handoff'].includes(resize), `unknown scenario: ${resize}`);
 const trace = record => {
   if (process.env.IOCRAFT_WIRE_TRACE)
     fs.appendFileSync(process.env.IOCRAFT_WIRE_TRACE, JSON.stringify({ time: Date.now(), ...record }) + '\n');
@@ -118,7 +118,24 @@ function check(label, phase, committed) {
     await settle('FooterMarker p5 a0 240x40');
     const committed = ['SharedPartialJoined', 'SameBatch:end', 'StdoutPrefix:StderrSuffix'];
     check('cross-stream order', 5, committed);
-    if (resize === 'oversized-history') {
+    if (resize === 'handoff') {
+      child.write('\x1bOQ'); // F2: leave a partial history line before handoff.
+      await settle('FooterMarker p2 a0 240x40');
+      child.write('\x1b[20~'); // F9: release rendering AND stdin to an external operation.
+      await settle('ExternalProgramPrompt');
+      assert(!snapshot().includes('FooterMarker'), 'handoff left the live frame visible');
+      const started = Date.now();
+      child.write('HandoffInput\r');
+      // The canvas has not changed. It must still be fully repainted on resume.
+      await settle('FooterMarker p2 a0 240x40', 240, started);
+      check('identical frame after handoff', 2,
+        [...committed, 'SharedPartial', 'ExternalProgramResult:HandoffInput']);
+      child.write('Resume\x1bOR'); // typing works again, then F3 starts new history.
+      await settle('FooterMarker p3 a0 240x40');
+      check('history after handoff', 3,
+        [...committed, 'SharedPartial', 'ExternalProgramResult:HandoffInput', 'Joined']);
+      assert(snapshot().includes('DraftSurvivesResume'), 'input ownership did not return');
+    } else if (resize === 'oversized-history') {
       // A large live panel can exceed the viewport without any terminal resize.
       // Closing it must preserve shell history and earlier committed output.
       // This data-retention check does not waive the strict resize matrix above.

@@ -7,7 +7,7 @@ const fromHost = name => require(path.join(process.env.IOCRAFT_TERMINAL_MODULES,
 const { Terminal } = fromHost('@xterm/headless');
 const pty = fromHost('node-pty');
 const [fixture, mode, scenario] = process.argv.slice(2);
-assert(fixture && ['bundled', 'system'].includes(mode) && ['clear', 'paste', 'middle-paste', 'clear-paste'].includes(scenario));
+assert(fixture && ['bundled', 'system'].includes(mode) && ['clear', 'paste', 'middle-paste', 'clear-paste', 'navigation', 'rendered-cursor'].includes(scenario));
 const terminal = new Terminal({ cols: 100, rows: 30, scrollback: 1000, allowProposedApi: true,
   reflowCursorLine: mode !== 'system', windowsPty: { backend: 'conpty', buildNumber: Number(os.release().split('.')[2]) } });
 const env = { ...process.env, TERM: 'xterm-256color' };
@@ -63,11 +63,18 @@ async function stop() {
       paste: ['\x1b[200~Pasted\x1b[201~Fresh', 'Seed[Pasted]Fresh'],
       'middle-paste': ['\x1b[H\x1b[C\x1b[C\x1b[200~界\x1b[201~Fresh', 'Se[界]Freshed'],
       'clear-paste': ['\x15\x1b[200~Pasted\x1b[201~Fresh', '[Pasted]Fresh'],
+      navigation: ['\x1b[H\x1b[CX\x1b[D\x1b[3~\x1b[F\x7f\x1b[HZ', 'ZSee'],
+      'rendered-cursor': ['\x1b[H\x1b[CX\x1b[D', 'SXeed'],
     };
     const [burst, expected] = cases[scenario];
     child.write(burst + '\x1b[17~');
     await waitFor('BatchAck:1');
     assert(screen().includes(`InputValue:${expected}:EndValue`), `${mode} ${scenario}: ${screen()}`);
+    if (scenario === 'rendered-cursor') {
+      child.write('Z\x1b[17~');
+      await waitFor('BatchAck:2');
+      assert(screen().includes('InputValue:SZXeed:EndValue'), `${mode} cursor after render: ${screen()}`);
+    }
     console.log(JSON.stringify({ mode, scenario, expected, result: 'PASS' }));
     await stop();
     assert.equal(exitCode, 0, 'fixture exit');
