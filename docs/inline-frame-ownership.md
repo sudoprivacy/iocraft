@@ -319,3 +319,51 @@ establish that the erase will execute in that same geometry generation. Avoid
 claiming an atomic resize transaction from batching or synchronized output:
 [the synchronized-output protocol](https://contour-terminal.org/vt-extensions/synchronized-output/)
 defers visible painting, while the emulator continues interpreting input.
+
+### Mainline compatibility and external ownership (2026-10-06)
+
+The research branch integrates main `2e495ed`, retaining span backgrounds,
+terminal palette discovery, ordered input editing, Unix event readiness and
+exclusive external terminal operations. Input editing uses main's implementation
+unchanged. Its dedicated input PTY workflow replaces the duplicate input job in
+the inline workflow; none of its six scenarios or two backends were removed.
+
+External handoff is another presentation boundary. After the backend releases
+the terminal, `PresentationState::release_terminal` invalidates both the canvas
+baseline and partial-history continuation coordinates, while retaining queued
+history. The render loop no longer owns a separate canvas reset. The same rule
+applies when an external callback panics. A regression fails without the release
+call: an identical resumed frame paints once rather than twice. The fixed test
+also checks that resuming does not erase the external program's output.
+
+A real-PTY `handoff` scenario now runs on both Windows backends in CI. It leaves
+an unfinished history line, transfers stdin to a blocking external operation,
+then resumes an identical canvas after output without a newline. Both local
+backends preserved all 70 history lines, committed messages and the draft;
+input returned to the UI and subsequent history did not overwrite external
+output. All 12 input-editing scenarios passed. Oversized-panel history also
+passed on both backends but still reported 26 saved live rows.
+
+Strict resize acceptance remains failed after this integration: bundled ConPTY
+duplicates Status on 240→100; system ConPTY loses history line 43 on 100→240.
+These results still prohibit merging this PR as a completed resize repair or
+replacing the installed CLI. Handoff during resize is not covered by the new
+non-resize test, and inherits the unresolved geometry problem.
+
+### Frontend-only anchor controls (2026-10-06)
+
+`cursor_boundary_matrix.cjs` isolates reflow without application erase/repaint.
+It compares the first UI row, a blank guard row before the UI, a blank tail, and
+DECSC/DECRC saved positioning, with autowrap enabled and disabled while writing
+the frame. It uses the same pinned xterm version and both host configurations.
+This is a diagnostic, not a real-PTY or GUI acceptance test.
+
+With the bundled configuration, width 240→100 moves a first-row cursor from
+absolute row 70 to 75 while Status stays at 70. A blank guard's cursor also moves
+70→75 while Status stays at 71. Saved positioning exhibits the same first-row
+drift. Disabling autowrap while writing makes no difference in these samples.
+The blank tail remains after the frame, but its distance changes from 6 to 11
+rows, retaining the stale-width rewind hazard described above. Short numbered
+history remains intact in the diagnostic; one guard-row height-shrink sequence
+loses Status before any application erase. None establishes a safe runtime
+anchor contract or expands the approved degradation policy.
