@@ -200,6 +200,13 @@ impl Component for MixedText {
             if self.wrap == TextWrap::Wrap && !painted_tail {
                 line.trim_end();
             }
+            // Trimming can remove every span of a blank/whitespace-only row.
+            // It still occupies a measured row: advancing only inside the
+            // span loop shifts every later paragraph and scroll coordinate.
+            if line.segments.is_empty() {
+                drawer.append_lines(["", ""], CanvasTextStyle::default(), None);
+                continue;
+            }
 
             let additional_padding = padding - x_offset;
             if additional_padding > 0 {
@@ -244,6 +251,36 @@ impl Component for MixedText {
 #[cfg(test)]
 mod tests {
     use crate::prelude::*;
+
+    #[test]
+    fn mixed_text_keeps_blank_rows_in_the_measured_coordinate_space() {
+        for text in ["first\n\nlast", "\nfirst\n  \n\nlast", "first\n \nlast\n\n"] {
+            for width in [4, 20] {
+                let plain = element! { Text(content: text) }.render(Some(width));
+                let mixed = element! { MixedText(contents: vec![MixedTextContent::new(text)]) }
+                    .render(Some(width));
+                assert_eq!(mixed.height(), plain.height());
+                for row in 0..plain.height() {
+                    assert_eq!(
+                        mixed.get_text(0, row, width, 1).trim_end(),
+                        plain.get_text(0, row, width, 1).trim_end(),
+                        "{text:?}, width {width}, row {row}"
+                    );
+                }
+            }
+        }
+        let styled = element! { MixedText(contents: vec![
+            MixedTextContent::new("first\n").color(Color::Blue),
+            MixedTextContent::new("\n \n").weight(Weight::Bold),
+            MixedTextContent::new("last").color(Color::Green),
+        ]) }
+        .render(Some(20));
+        assert_eq!(styled.get_text(0, 3, 20, 1).trim_end(), "last");
+        assert_eq!(
+            styled.cell(0, 3).unwrap().text_style().unwrap().color,
+            Some(Color::Green)
+        );
+    }
 
     #[test]
     fn mixed_backgrounds_survive_wrap_without_coloring_following_text() {

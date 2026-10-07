@@ -117,8 +117,10 @@ impl Text {
     fn do_wrap(s: &str, width: usize) -> String {
         let s: SegmentedString = s.into();
         let mut ret = String::new();
-        for line in s.wrap(width) {
-            if !ret.is_empty() {
+        for (index, line) in s.wrap(width).into_iter().enumerate() {
+            // A leading empty row still separates two logical rows. Testing
+            // the accumulated string loses that separator in measurement.
+            if index > 0 {
                 ret.push('\n');
             }
             ret.push_str(line.to_string().trim_end());
