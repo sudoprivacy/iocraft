@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/sudoprivacy/iocraft/compare/iocraft-v0.8.4...iocraft-v0.9.0) - 2026-10-07
+
+### Added
+
+- *(text)* preserve span backgrounds in dynamic terminal output
+- *(terminal)* suspend rendering for exclusive external input
+- *(text_input)* add on_paste prop for caller-controlled paste handling
+- bracketed paste — multi-line paste no longer auto-submits ([#1](https://github.com/sudoprivacy/iocraft/pull/1))
+- incremental auto_grow implementation — clean delta from upstream
+- add auto_grow prop for TextInput — opt-in auto-wrap with content-driven height
+- *(text_input)* multiline auto-wrap with content-driven height
+- *(text_input)* auto-grow height for multiline + terminal width fallback
+- *(iocraft)* support OSC 8 hyperlinks in the canvas ([#216](https://github.com/sudoprivacy/iocraft/pull/216))
+
+### Fixed
+
+- preserve empty rows in styled text coordinates
+- preserve inline frame and history ownership through resize
+- *(text-input)* preserve ordered edits and cursor ownership
+- *(input)* preserve batched Unix terminal events
+- *(terminal)* use native palette fallback for Windows consoles
+- *(input)* preserve typing after non-color escape prefixes
+- *(text)* keep painted padding before an unstyled newline
+- *(text)* retain background padding at wrapped line endings
+- anchor inline frames across terminal reflow
+- address current stable compiler and clippy compatibility
+- preserve independent dim and strikethrough text attributes
+- *(terminal,text_input)* bracketed-paste feature + correct Paste arm placement
+- guard all render-phase state sets against no-op writes
+- auto_grow TextBufferView — use layout style instead of measure func
+- prevent auto_grow exit hang — cache measure dimensions and check should_exit after select
+- gate TextBufferView measure_func on auto_grow prop
+- only set measure_func when text content changes to prevent infinite render
+- remove use_measure_func from TextInput to prevent infinite render loop
+- set max width to enable full width layout ([#223](https://github.com/sudoprivacy/iocraft/pull/223))
+- don't consider empty rows equal to non-existent rows ([#222](https://github.com/sudoprivacy/iocraft/pull/222))
+- *(scroll-view)* preserve auto-scroll state on no-op input ([#220](https://github.com/sudoprivacy/iocraft/pull/220))
+- propagate terminal input errors ([#218](https://github.com/sudoprivacy/iocraft/pull/218))
+- *(iocraft)* correct CSI final byte class and strip DCS/APC/PM sequences ([#214](https://github.com/sudoprivacy/iocraft/pull/214))
+
+### Other
+
+- *(pty)* protect input editing on both Windows terminal backends
+- point crossterm at sudoprivacy fork for Windows VT bracketed paste
+- restore upstream text_input.rs for incremental fix approach
+- Implement Hyperlinks in Text and MixedText ([#224](https://github.com/sudoprivacy/iocraft/pull/224))
+
 ## [0.8.4](https://github.com/ccbrown/iocraft/compare/iocraft-v0.8.3...iocraft-v0.8.4) - 2026-07-13
 
 ### Added
