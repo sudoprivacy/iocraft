@@ -12,7 +12,7 @@ unstable-output-streams = []
 
 [dependencies]
 async-io = "2"
-crossterm = { git = "https://github.com/sudoprivacy/crossterm.git", rev = "678dbc80d00315b403dc51e28cc09e4aba4057e4", features = ["event-stream", "bracketed-paste"] }
+crossterm = { git = "https://github.com/sudoprivacy/crossterm.git", rev = "cee626a1664f9c72e62330e4887f4169808e685c", features = ["event-stream", "bracketed-paste"] }
 futures = "0.3.30"
 taffy = { version = "0.5.2", default-features = false, features = ["std", "flexbox", "taffy_tree"] }
 iocraft-macros = { version = "0.2.4", path = "../iocraft-macros" }
