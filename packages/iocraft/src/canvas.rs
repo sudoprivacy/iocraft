@@ -1217,6 +1217,43 @@ line two
     }
 
     #[test]
+    fn test_cloned_canvas_keeps_unicode_and_independent_run_styles() {
+        let mut canvas = Canvas::new(12, 1);
+        let first = CanvasTextStyle {
+            color: Some(Color::Blue),
+            weight: Weight::Bold,
+            ..Default::default()
+        };
+        let second = CanvasTextStyle {
+            color: Some(Color::Green),
+            dim: true,
+            ..Default::default()
+        };
+        let text = "Ae\u{301}界";
+        {
+            let mut view = canvas.subview_mut(0, 0, 0, 0, 12, 1);
+            view.set_text(0, 0, text, first);
+            view.set_text(6, 0, text, second);
+        }
+        let saved = canvas.clone();
+        canvas
+            .subview_mut(0, 0, 0, 0, 12, 1)
+            .set_text(0, 0, text, second);
+
+        for (offset, glyph) in [(0, "A"), (1, "e\u{301}"), (2, "界")] {
+            let original = saved.cell(offset, 0).unwrap();
+            let other_run = saved.cell(offset + 6, 0).unwrap();
+            let updated = canvas.cell(offset, 0).unwrap();
+            assert_eq!(original.text(), Some(glyph));
+            assert_eq!(other_run.text(), Some(glyph));
+            assert_eq!(updated.text(), Some(glyph));
+            assert_eq!(original.text_style(), Some(&first));
+            assert_eq!(other_run.text_style(), Some(&second));
+            assert_eq!(updated.text_style(), Some(&second));
+        }
+    }
+
+    #[test]
     fn test_cell_is_empty() {
         let mut canvas = Canvas::new(5, 1);
         assert!(canvas.cell(0, 0).unwrap().is_empty());
