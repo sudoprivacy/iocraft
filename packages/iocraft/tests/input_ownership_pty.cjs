@@ -7,7 +7,7 @@ const fromHost = name => require(path.join(process.env.IOCRAFT_TERMINAL_MODULES,
 const { Terminal } = fromHost('@xterm/headless');
 const pty = fromHost('node-pty');
 const [fixture, mode, scenario] = process.argv.slice(2);
-assert(fixture && ['bundled', 'system'].includes(mode) && ['clear', 'paste', 'middle-paste', 'clear-paste', 'navigation', 'rendered-cursor', 'resize-boundary', 'resize-restore-boundary'].includes(scenario));
+assert(fixture && ['bundled', 'system'].includes(mode) && ['clear', 'paste', 'middle-paste', 'clear-paste', 'navigation', 'rendered-cursor', 'resize-boundary', 'resize-restore-boundary', 'resize-narrow-burst', 'resize-pending-burst', 'resize-pending-restore'].includes(scenario));
 const terminal = new Terminal({ cols: 100, rows: 30, scrollback: 1000, allowProposedApi: true,
   ...(process.platform === 'win32' ? { reflowCursorLine: mode !== 'system',
     windowsPty: { backend: 'conpty', buildNumber: Number(os.release().split('.')[2]) } } : {}) });
@@ -17,10 +17,46 @@ delete env.NO_COLOR;
 const child = pty.spawn(path.resolve(fixture), [], { cols: 100, rows: 30,
   cwd: path.dirname(path.resolve(fixture)), env, useConpty: true, useConptyDll: mode === 'bundled' });
 let pending = 0, lastData = Date.now(), exited = false, exitCode;
+const pausedScenario = scenario === 'resize-pending-burst' || scenario === 'resize-pending-restore';
+let paused = false;
+function ownedIdentity() {
+  const stat = fs.readFileSync(`/proc/${child.pid}/stat`, 'utf8');
+  const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
+  return { state: fields[0], parent: fields[1], birth: fields[19] };
+}
+assert(!pausedScenario || process.platform === 'linux', 'pending-readiness probes require Linux /proc identity');
+const originalIdentity = pausedScenario ? ownedIdentity() : null;
+function signalOwned(signal) {
+  assert(!exited, 'fixture already exited');
+  const current = ownedIdentity();
+  assert.equal(current.birth, originalIdentity.birth, 'fixture PID was reused');
+  assert.equal(current.parent, originalIdentity.parent, 'fixture ownership changed');
+  process.kill(child.pid, signal);
+}
+async function pauseOwned() {
+  signalOwned('SIGSTOP');
+  paused = true;
+  const until = Date.now() + 1000;
+  while (Date.now() < until) {
+    if (ownedIdentity().state === 'T') return;
+    await sleep(10);
+  }
+  throw new Error('owned fixture did not stop');
+}
+function resumeOwned() {
+  if (paused) {
+    signalOwned('SIGCONT');
+    paused = false;
+  }
+}
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 function screen() {
   const b = terminal.buffer.active;
   return Array.from({ length: b.length }, (_, row) => b.getLine(row).translateToString(true)).join('\n');
+}
+function viewport() {
+  const b = terminal.buffer.active;
+  return Array.from({ length: terminal.rows }, (_, row) => b.getLine(b.baseY + row)?.translateToString(true) ?? '').join('\n');
 }
 child.onData(data => {
   if (process.env.IOCRAFT_WIRE_TRACE)
@@ -35,10 +71,10 @@ terminal.parser.registerCsiHandler({ final: 'c' }, params => {
   }
   return false;
 });
-async function waitFor(text) {
+async function waitFor(text, settled = true) {
   const until = Date.now() + 15000;
   while (Date.now() < until) {
-    if (!pending && Date.now() - lastData > 250 && screen().includes(text)) return;
+    if (!pending && (!settled || Date.now() - lastData > 250) && viewport().includes(text)) return;
     assert(!exited, `fixture exited before ${text}`);
     await sleep(20);
   }
@@ -57,32 +93,63 @@ async function stop() {
 (async () => {
   try {
     await waitFor('InputValue::EndValue');
-    child.write('Seed');
-    await waitFor('InputValue:Seed:EndValue');
-    if (scenario === 'resize-boundary' || scenario === 'resize-restore-boundary') {
-      terminal.resize(30, 8);
-      child.resize(30, 8);
+    const narrowBurst = scenario === 'resize-narrow-burst' || pausedScenario;
+    const seed = narrowBurst ? 'DraftHeadTail' : 'Seed';
+    child.write(seed);
+    await waitFor(`InputValue:${seed}:EndValue`, !narrowBurst);
+    if (narrowBurst) {
+      // Match the real CLI's middle-cursor preparation. Observe rendered text,
+      // but do not insert a quiet-period barrier before the critical resize.
+      child.write('\x1b[H\x1b[C\x1b[C\x1b[C\x1b[C\x1b[CX');
+      await waitFor('InputValue:DraftXHeadTail:EndValue', false);
+      child.write('\x7f');
+      await waitFor('InputValue:DraftHeadTail:EndValue', false);
+    }
+    if (scenario === 'resize-boundary' || scenario === 'resize-restore-boundary' || narrowBurst) {
+      const narrow = narrowBurst;
+      const width = narrow ? 12 : 30;
+      if (scenario === 'resize-pending-burst') {
+        await waitFor('InputValue:DraftHeadTail:EndValue');
+        await pauseOwned();
+      }
+      terminal.resize(width, 8);
+      child.resize(width, 8);
       if (scenario === 'resize-restore-boundary') await waitFor('Viewport:30x8:blocked');
+      if (scenario === 'resize-pending-restore') {
+        await waitFor('Focus:off');
+        await pauseOwned();
+      }
       // F6 acknowledges delivery. For the restore case do not wait between
       // hidden input and growth: those pre-resize keys still own the old frame.
-      child.write('MustNotAppear\r\x1b[17~');
+      child.write('MustNotAppear' + (pausedScenario
+        ? '\x1b[200~HiddenPaste\x1b[201~\r'
+        : narrow ? '' : '\r\x1b[17~'));
+      if (scenario === 'resize-pending-burst') resumeOwned();
+      if (narrow && scenario !== 'resize-pending-restore') await waitFor('Focus:off');
       if (scenario === 'resize-boundary') {
         await waitFor('Viewport:30x8:blocked');
         await waitFor('BatchAck:1');
       }
       terminal.resize(100, 30);
       child.resize(100, 30);
+      resumeOwned();
+      // A restored size marker may also exist in scrollback from startup.
+      // Require a fresh, non-editing acknowledgment in the actual viewport;
+      // the critical resize/input burst above remains unsynchronized.
+      const restoredAck = narrow ? 1 : 2;
+      child.write('\x1b[17~');
       await waitFor('Viewport:100x30:reviewable');
-      await waitFor('BatchAck:1');
-      const latestValue = () => [...screen().matchAll(/InputValue:([^\r\n]*):EndValue/g)].at(-1)?.[1];
-      const latestConfirmed = () => [...screen().matchAll(/Confirmed:(\d+)/g)].at(-1)?.[1];
-      assert.equal(latestValue(), 'Seed', `${mode}: hidden draft mutated\n${screen()}`);
+      await waitFor(`BatchAck:${restoredAck}`);
+      const latestValue = () => [...viewport().matchAll(/InputValue:([^\r\n]*):EndValue/g)].at(-1)?.[1];
+      const latestConfirmed = () => [...viewport().matchAll(/Confirmed:(\d+)/g)].at(-1)?.[1];
+      assert.equal(latestValue(), seed, `${mode}: hidden draft mutated\n${screen()}`);
       assert.equal(latestConfirmed(), '0', `${mode}: unseen controls confirmed\n${screen()}`);
       child.write('Kept\r\x1b[17~');
-      await waitFor('BatchAck:2');
-      assert.equal(latestValue(), 'SeedKept', 'focus restored after resize');
+      await waitFor(`BatchAck:${restoredAck + 1}`);
+      const expected = narrow ? 'DraftKeptHeadTail' : 'SeedKept';
+      assert.equal(latestValue(), expected, 'focus restored after resize');
       assert.equal(latestConfirmed(), '1', 'visible controls remain operable');
-      console.log(JSON.stringify({ mode, scenario, expected: 'SeedKept', result: 'PASS' }));
+      console.log(JSON.stringify({ mode, scenario, expected, result: 'PASS' }));
       await stop();
       assert.equal(exitCode, 0, 'fixture exit');
       return;
@@ -107,5 +174,5 @@ async function stop() {
     console.log(JSON.stringify({ mode, scenario, expected, result: 'PASS' }));
     await stop();
     assert.equal(exitCode, 0, 'fixture exit');
-  } finally { await stop(); terminal.dispose(); }
+  } finally { resumeOwned(); await stop(); terminal.dispose(); }
 })().then(() => process.exit(0)).catch(error => { console.error(error); process.exit(1); });

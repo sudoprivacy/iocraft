@@ -109,6 +109,7 @@ mod context;
 mod element;
 mod handler;
 mod hook;
+mod input_frame;
 mod multimap;
 mod props;
 mod render;
@@ -125,6 +126,7 @@ mod flattened_exports {
     pub use crate::element::*;
     pub use crate::handler::*;
     pub use crate::hook::*;
+    pub use crate::input_frame::*;
     pub use crate::props::*;
     pub use crate::render::*;
     pub use crate::style::*;

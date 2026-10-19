@@ -1,9 +1,29 @@
 //! Controlled-input diagnostic: parent commands and child edits in one burst.
 use iocraft::prelude::*;
 
+fn trace_input_event(event: &TerminalEvent, width: u16, height: u16) {
+    let Ok(path) = std::env::var("IOCRAFT_INPUT_EVENT_TRACE") else {
+        return;
+    };
+    // Optional fixture-only observation, never an input-admission mechanism.
+    use std::io::Write;
+    if let Ok(mut log) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let physical = crossterm::terminal::size().ok();
+        let _ = writeln!(
+            log,
+            "callback={width}x{height} physical={physical:?} event={event:?}"
+        );
+    }
+}
+
 #[component]
 fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let (width, height) = hooks.use_terminal_size();
+    let input_frame = hooks.use_input_frame();
     let reviewable = width >= 40 && height >= 12;
     let mut value = hooks.use_state(String::new);
     let mut exit = hooks.use_state(|| false);
@@ -11,6 +31,7 @@ fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut confirmed = hooks.use_state(|| 0_u32);
     let mut system = hooks.use_context_mut::<SystemContext>();
     hooks.use_terminal_events(move |event| {
+        trace_input_event(&event, width, height);
         if let TerminalEvent::Key(KeyEvent {
             code,
             kind: KeyEventKind::Press,
@@ -20,7 +41,9 @@ fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             match code {
                 KeyCode::Esc => exit.set(true),
                 KeyCode::F(6) => acknowledgment.set(acknowledgment.get() + 1),
-                KeyCode::Enter if reviewable => confirmed.set(confirmed.get() + 1),
+                KeyCode::Enter if reviewable && input_frame.is_current() => {
+                    confirmed.set(confirmed.get() + 1)
+                }
                 _ => {}
             }
         }
@@ -46,6 +69,7 @@ fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     element! {
         View(flex_direction: FlexDirection::Column) {
             Text(content: format!("Viewport:{width}x{height}:{}", if reviewable { "reviewable" } else { "blocked" }))
+            Text(content: if reviewable { "Focus:on" } else { "Focus:off" })
             Text(content: format!("InputValue:{}:EndValue", value.read().as_str()))
             Text(content: format!("BatchAck:{}", acknowledgment.get()))
             Text(content: format!("Confirmed:{}", confirmed.get()))
