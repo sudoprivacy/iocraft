@@ -104,8 +104,12 @@ jobs:
           if-no-files-found: warn
 
   linux-resize:
-    name: Linux real PTY resize
-    runs-on: ubuntu-24.04
+    name: Unix real PTY resize (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -131,7 +135,11 @@ jobs:
       - name: Reflow before accepting the next input burst
         run: |
           export IOCRAFT_TERMINAL_MODULES="$GITHUB_WORKSPACE/packages/iocraft/tests/terminal-host/node_modules"
-          for scenario in resize-boundary resize-restore-boundary resize-narrow-burst resize-pending-burst resize-pending-restore; do
+          scenarios="resize-boundary resize-restore-boundary resize-narrow-burst"
+          if [ "$RUNNER_OS" = Linux ]; then
+            scenarios="$scenarios resize-pending-burst resize-pending-restore"
+          fi
+          for scenario in $scenarios; do
             IOCRAFT_WIRE_TRACE="$RUNNER_TEMP/inline-pty-logs/$scenario-wire.jsonl" \
               node packages/iocraft/tests/input_ownership_pty.cjs \
               target/debug/examples/input_ownership_fixture bundled "$scenario" \
@@ -141,6 +149,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: inline-pty-linux
+          name: inline-pty-${{ runner.os }}
           path: ${{ runner.temp }}/inline-pty-logs/
           if-no-files-found: warn

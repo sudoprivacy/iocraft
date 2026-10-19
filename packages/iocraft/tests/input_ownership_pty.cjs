@@ -121,7 +121,9 @@ async function stop() {
       }
       // F6 acknowledges delivery. For the restore case do not wait between
       // hidden input and growth: those pre-resize keys still own the old frame.
-      child.write('MustNotAppear' + (narrow ? '' : '\r\x1b[17~'));
+      child.write('MustNotAppear' + (pausedScenario
+        ? '\x1b[200~HiddenPaste\x1b[201~\r'
+        : narrow ? '' : '\r\x1b[17~'));
       if (scenario === 'resize-pending-burst') resumeOwned();
       if (narrow && scenario !== 'resize-pending-restore') await waitFor('Focus:off');
       if (scenario === 'resize-boundary') {
