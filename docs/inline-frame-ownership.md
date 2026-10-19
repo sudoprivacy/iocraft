@@ -55,6 +55,39 @@ CI runs it alongside slow, rapid and interleaved resize on Unix and bundled
 ConPTY. A frame that exceeds its viewport still has the limitations below; the
 original 30x8 diagnostic is retained unchanged.
 
+### Reuse shifted inline rows
+
+For bounded canvases at a stable width, growing prose can retain the existing
+footer, and a clipped rolling paragraph can retain rows already visible. The
+terminal compares complete styled cells and moves a matching region with normal
+insert/delete-line commands, then paints only the changed rows. It extends the
+tail before insertion so a footer at the viewport bottom is preserved.
+
+A private row-diff plan owns the visibility checks, index mapping and byte-cost
+choice. It counts bytes through the existing row encoder, including extra rows
+a move would force it to repaint, and only chooses a move when it saves bytes
+after control-sequence overhead. It adds no source/history cache and leaves the
+component and input APIs unchanged. The real-PTY `row-shift` workflow checks
+history, footer and draft retention, and rejects discarded live rows appearing
+in native scrollback.
+
+### Bound live-frame allocation
+
+The presentation owner retains the current diff baseline and at most one spare
+Canvas. Rendering clears and resizes the spare before drawing; successful
+presentation makes the old baseline available for the next render. A no-op
+frame returns its buffer without writing or changing input acknowledgment.
+Clear, resize recovery and external ownership discard both buffers. A spare
+larger than the current frame is released, and narrowing releases excess row
+capacity, so a completed large preview does not remain in an idle screen's
+cache. All cells lose their old text, styles and hyperlinks before reuse.
+
+Unbounded text layout (`NoWrap`) also skips optional word breaks. The original
+line builder still owns mandatory Unicode breaks and style/offset mapping;
+it no longer allocates and then merges a temporary segment for every word.
+The regression compares its result with the ordinary large-width algorithm
+for mixed styles, blank rows, CJK, combining marks, emoji and Unicode separators.
+
 ### Remaining limits
 
 - If old live rows have moved above the cursor-addressable viewport, retain

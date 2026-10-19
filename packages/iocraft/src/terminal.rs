@@ -25,6 +25,7 @@ use std::{
 
 mod frame;
 mod output;
+mod row_diff;
 pub(crate) use frame::HistoryMessage;
 use frame::PresentationState;
 use output::FrameWriter;
@@ -608,10 +609,19 @@ impl TerminalImpl for StdTerminal<'_> {
         let prev_height = prev.height();
         let new_height = canvas.height();
         let max_height = prev_height.max(new_height);
-        let mut current_y = prev_height.saturating_sub(1);
+        let shift = self
+            .size
+            .and_then(|size| row_diff::RowShift::between(prev, canvas, size));
+        let mut current_y = match &shift {
+            Some(shift) => shift.apply(&mut self.dest, prev_height)?,
+            None => prev_height.saturating_sub(1),
+        };
 
         for y in 0..max_height {
-            if prev.row_eq(canvas, y) {
+            if shift.as_ref().map_or_else(
+                || prev.row_eq(canvas, y),
+                |shift| shift.row_unchanged(prev, canvas, y),
+            ) {
                 continue;
             }
             // If a changed row has scrolled off the top of the visible area,
@@ -1092,6 +1102,14 @@ impl<'a> Terminal<'a> {
 
     pub fn end_frame(&mut self) -> io::Result<()> {
         self.inner.end_frame()
+    }
+
+    pub(crate) fn take_render_buffer(&mut self) -> Option<Canvas> {
+        self.presentation.take_render_buffer()
+    }
+
+    pub(crate) fn recycle_render_buffer(&mut self, canvas: Canvas) {
+        self.presentation.recycle_render_buffer(canvas);
     }
 
     pub(crate) fn needs_presentation(&self, canvas: &Canvas) -> bool {
@@ -2505,6 +2523,121 @@ mod tests {
             body + 2,
             "history and live frame must remain adjacent"
         );
+    }
+
+    #[test]
+    fn repeated_rows_do_not_force_extra_repainting() {
+        let (dest, bytes) = new_test_writer();
+        let mut term = new_inline_term_with_size(dest, 0, (40, 20));
+        let mut vt = avt::Vt::new(40, 20);
+        vt.feed_str("CallerHistory\r\n");
+        let repeated = "Repeated colored prose stays in place";
+        let mut previous = None;
+        for first in ["Original first line", repeated] {
+            term.begin_frame(previous.as_ref()).unwrap();
+            let canvas = element! {
+                Text(content: format!("{first}\n{repeated}\n{repeated}\nFooterKeep"), color: Color::Green)
+            }.render(Some(40));
+            term.write_canvas(previous.as_ref(), &canvas).unwrap();
+            term.end_frame().unwrap();
+            let frame = String::from_utf8(std::mem::take(&mut *bytes.lock().unwrap())).unwrap();
+            assert!(
+                !frame.contains("\x1b[1M") && !frame.contains("\x1b[2M"),
+                "a move must save actual row bytes"
+            );
+            vt.feed_str(&frame);
+            assert_eq!(vt.line(1).text().trim_end(), first);
+            for row in [2, 3] {
+                assert_eq!(vt.line(row).text().trim_end(), repeated);
+            }
+            previous = Some(canvas);
+        }
+    }
+
+    #[test]
+    fn growing_and_rolling_prose_keeps_footer_draft_history_and_cell_styles() {
+        let (dest, bytes) = new_test_writer();
+        let mut term = new_inline_term_with_size(dest, 0, (40, 30));
+        term.set_history_blank_anchor(true);
+        let mut vt = avt::Vt::new(40, 30);
+        vt.feed_str("CallerHistory\r\n\r\n");
+        let body = [
+            "Alpha 界 e\u{301}",
+            "Beta ordinary prose",
+            "Gamma ordinary prose",
+            "Delta ordinary prose",
+            "Epsilon ordinary prose",
+            "Zeta ordinary prose",
+            "Eta ordinary prose",
+            "Theta ordinary prose",
+            "Iota ordinary prose",
+            "Kappa ordinary prose",
+        ];
+        let mut previous = None;
+        for (start, end) in [(0, 6), (0, 8), (2, 10)] {
+            term.begin_frame(previous.as_ref()).unwrap();
+            let mut canvas = Canvas::new(40, end - start + 4);
+            for (row, text) in body[start..end].iter().enumerate() {
+                canvas
+                    .subview_mut(0, 0, 0, 0, 40, end - start + 4)
+                    .set_text(
+                        0,
+                        row as isize,
+                        text,
+                        CanvasTextStyle {
+                            color: Some(Color::Green),
+                            underline: true,
+                            ..CanvasTextStyle::default()
+                        },
+                    );
+            }
+            for (offset, text) in ["StatusKeep", "UpperSeparator", "DraftKept", "FooterKeep"]
+                .iter()
+                .enumerate()
+            {
+                canvas
+                    .subview_mut(0, 0, 0, 0, 40, end - start + 4)
+                    .set_text(
+                        0,
+                        (end - start + offset) as isize,
+                        text,
+                        CanvasTextStyle::default(),
+                    );
+            }
+            term.write_canvas(previous.as_ref(), &canvas).unwrap();
+            term.end_frame().unwrap();
+            let frame = String::from_utf8(std::mem::take(&mut *bytes.lock().unwrap())).unwrap();
+            if end == 8 {
+                assert!(
+                    frame.contains("\x1b[2L"),
+                    "growing prose should reuse its footer"
+                );
+            }
+            if start == 2 {
+                assert!(
+                    frame.contains("\x1b[2M"),
+                    "rolling prose should reuse retained rows"
+                );
+            }
+            vt.feed_str(&frame);
+            for (row, text) in body[start..end].iter().enumerate() {
+                let line = vt.line(row + 2);
+                assert_eq!(line.text().trim_end(), *text);
+                assert!(line.cells()[0].pen().is_underline());
+                assert!(line.cells()[0].pen().foreground().is_some());
+            }
+            let contents = vt.text().join("\n");
+            for marker in [
+                "CallerHistory",
+                "StatusKeep",
+                "UpperSeparator",
+                "DraftKept",
+                "FooterKeep",
+            ] {
+                assert_eq!(contents.matches(marker).count(), 1, "{contents}");
+            }
+            previous = Some(canvas);
+        }
     }
 
     #[test]

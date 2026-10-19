@@ -15,7 +15,7 @@ const { Terminal } = fromHost('@xterm/headless');
 const [fixture, mode = 'bundled', resize] = process.argv.slice(2);
 assert(fixture, 'pass an explicitly built fixture executable');
 assert(['bundled', 'system'].includes(mode), `unknown backend: ${mode}`);
-assert(!resize || ['resize', 'rapid', 'interleaved', 'tiny', 'bounded-tiny', 'history-growth', 'oversized-history'].includes(resize), `unknown scenario: ${resize}`);
+assert(!resize || ['resize', 'rapid', 'interleaved', 'tiny', 'bounded-tiny', 'history-growth', 'row-shift', 'oversized-history'].includes(resize), `unknown scenario: ${resize}`);
 const wireTrace = [];
 const trace = record => {
   if (process.env.IOCRAFT_WIRE_TRACE) wireTrace.push({ time: Date.now(), ...record });
@@ -152,6 +152,22 @@ function check(label, phase, committed) {
       const lastBody = lines.findIndex(row => row.trim() === 'ConcurrentSecond');
       const status = lines.findIndex(row => row.includes('StatusMarker'));
       assert.equal(status, lastBody + 2, 'history must remain adjacent to live chrome');
+    } else if (resize === 'row-shift') {
+      for (const [key, tail] of [['\x1b[21~', 'ProseZeta'], ['\x1b[23~', 'ProseTheta'], ['\x1b[24~', 'ProseKappa']]) {
+        const before = frames, started = Date.now();
+        child.write(key);
+        await settle(tail, 240, started, before);
+        check(`prose ${tail}`, 5, committed);
+        const text = snapshot();
+        for (const marker of ['ProseGamma', 'ProseDelta', 'ProseEpsilon', 'ProseZeta'])
+          assert.equal(text.split(marker).length - 1, 1, text);
+        if (tail === 'ProseKappa') {
+          assert(!text.includes('ProseAlpha') && !text.includes('ProseBeta'),
+            'discarded live rows must not enter native scrollback');
+          for (const marker of ['ProseEta', 'ProseTheta', 'ProseIota', 'ProseKappa'])
+            assert.equal(text.split(marker).length - 1, 1, text);
+        }
+      }
     } else if (resize === 'oversized-history') {
       // A large live panel can exceed the viewport without any terminal resize.
       // Closing it must preserve shell history and earlier committed output.
@@ -170,7 +186,7 @@ function check(label, phase, committed) {
       assert(snapshot().includes('DraftSurvives'), 'closing panel lost the draft');
       console.log(JSON.stringify({ mode, label: 'oversized panel history', historyLines: 70,
         committed, staleLiveRows: lines.filter(line => line === 'Expanded live content').length }));
-    } else if (resize) {
+    } else if (['resize', 'rapid', 'interleaved', 'tiny', 'bounded-tiny'].includes(resize)) {
       let acknowledgment = 0;
       function resizeTo(cols, rows) {
         const before = geometry('before frontend resize');
@@ -209,6 +225,7 @@ function check(label, phase, committed) {
         check(`resize ${cols}x${rows}`, 5, committed);
       }
     }
+    else if (resize) assert.fail(`scenario ${resize} has no acceptance workflow`);
     child.write('\x1b');
     for (let i = 0; i < 250; i++) {
       // With the pinned node-pty on Windows, pipe close can emit onExit before

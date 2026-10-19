@@ -29,12 +29,26 @@ impl HistoryMessage {
 #[derive(Default)]
 pub(super) struct PresentationState {
     previous: Option<Canvas>,
+    recycled: Option<Canvas>,
     pending: Vec<HistoryMessage>,
     // This belongs to the terminal, not to the hook which last printed text.
     appended_newline: Option<u16>,
 }
 
 impl PresentationState {
+    pub(super) fn take_render_buffer(&mut self) -> Option<Canvas> {
+        self.recycled.take()
+    }
+
+    pub(super) fn recycle_render_buffer(&mut self, canvas: Canvas) {
+        // Keep one buffer no larger than the current live frame. Finishing a
+        // large preview must not retain its rows in an idle screen's cache.
+        self.recycled = self.previous.as_ref().and_then(|current| {
+            (canvas.width() <= current.width() && canvas.height() <= current.height())
+                .then_some(canvas)
+        });
+    }
+
     pub(super) fn has_pending_history(&self) -> bool {
         !self.pending.is_empty()
     }
@@ -43,8 +57,14 @@ impl PresentationState {
         self.has_pending_history() || self.previous.as_ref() != Some(canvas)
     }
 
-    pub(super) fn invalidate(&mut self) {
+    #[inline]
+    fn discard_render_buffers(&mut self) {
         self.previous = None;
+        self.recycled = None;
+    }
+
+    pub(super) fn invalidate(&mut self) {
+        self.discard_render_buffers();
         self.appended_newline = None;
     }
 
@@ -54,7 +74,7 @@ impl PresentationState {
 
     pub(super) fn begin_frame(&mut self, backend: &mut dyn TerminalImpl) -> io::Result<()> {
         if backend.begin_frame(self.previous.as_ref())? {
-            self.previous = None;
+            self.discard_render_buffers();
         }
         Ok(())
     }
@@ -62,8 +82,8 @@ impl PresentationState {
     pub(super) fn clear(&mut self, backend: &mut dyn TerminalImpl) -> io::Result<()> {
         if self.previous.is_some() {
             backend.clear_canvas()?;
-            self.previous = None;
         }
+        self.discard_render_buffers();
         Ok(())
     }
 
@@ -78,7 +98,9 @@ impl PresentationState {
             backend.write_canvas(self.previous.as_ref(), &canvas)?;
         }
         // Do not acknowledge a failed write by advancing the diff baseline.
-        self.previous = Some(canvas);
+        if let Some(previous) = self.previous.replace(canvas) {
+            self.recycle_render_buffer(previous);
+        }
         Ok(())
     }
 
@@ -301,7 +323,12 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(backend.paints, [false], "unchanged frames do not paint");
+        assert!(state.recycled.is_some());
         state.clear(&mut backend).unwrap();
+        assert!(
+            state.take_render_buffer().is_none(),
+            "clear releases spare rows"
+        );
         state.clear(&mut backend).unwrap();
         assert_eq!(backend.clears, 1);
         state

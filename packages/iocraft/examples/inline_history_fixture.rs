@@ -14,6 +14,7 @@ fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let (second, _) = hooks.use_output();
     let mut resize_history_written = hooks.use_state(|| false);
     let mut phase = hooks.use_state(|| 0_u32);
+    let mut prose_range = hooks.use_state(|| (0_usize, 0_usize));
     let mut acknowledgment = hooks.use_state(|| 0_u32);
     let mut history_count = hooks.use_state(|| 0_u32);
     let mut expanded = hooks.use_state(|| false);
@@ -62,6 +63,9 @@ fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         history_count.get()
                     ));
                 }
+                KeyCode::F(10) => prose_range.set((0, 6)),
+                KeyCode::F(11) => prose_range.set((0, 8)),
+                KeyCode::F(12) => prose_range.set((2, 10)),
                 KeyCode::Esc => done.set(true),
                 _ => {}
             }
@@ -79,8 +83,25 @@ fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     if done.get() {
         system.exit();
     }
+    let (start, end) = prose_range.get();
+    let prose = [
+        "ProseAlpha 界 e\u{301}",
+        "ProseBeta ordinary words",
+        "ProseGamma ordinary words",
+        "ProseDelta ordinary words",
+        "ProseEpsilon ordinary words",
+        "ProseZeta ordinary words",
+        "ProseEta ordinary words",
+        "ProseTheta ordinary words",
+        "ProseIota ordinary words",
+        "ProseKappa ordinary words",
+    ];
     element! {
         View(flex_direction: FlexDirection::Column) {
+            View(height: (end - start) as u32, flex_direction: FlexDirection::Column) {
+                #((start < end).then(|| element! { Text(content: prose[start..end].join("\n"),
+                    color: Some(Color::Green), wrap: TextWrap::NoWrap) }))
+            }
             #(expanded.get().then(|| element! {
                 Text(content: "Expanded live content\n".repeat(60))
             }))
