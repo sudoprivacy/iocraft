@@ -131,10 +131,12 @@ jobs:
       - name: Reflow before accepting the next input burst
         run: |
           export IOCRAFT_TERMINAL_MODULES="$GITHUB_WORKSPACE/packages/iocraft/tests/terminal-host/node_modules"
-          IOCRAFT_WIRE_TRACE="$RUNNER_TEMP/inline-pty-logs/resize-boundary-wire.jsonl" \
-            node packages/iocraft/tests/input_ownership_pty.cjs \
-            target/debug/examples/input_ownership_fixture bundled resize-boundary \
-            > "$RUNNER_TEMP/inline-pty-logs/resize-boundary.log" 2>&1
+          for scenario in resize-boundary resize-restore-boundary; do
+            IOCRAFT_WIRE_TRACE="$RUNNER_TEMP/inline-pty-logs/$scenario-wire.jsonl" \
+              node packages/iocraft/tests/input_ownership_pty.cjs \
+              target/debug/examples/input_ownership_fixture bundled "$scenario" \
+              > "$RUNNER_TEMP/inline-pty-logs/$scenario.log" 2>&1
+          done
       - name: Retain terminal output and wire traces
         if: always()
         uses: actions/upload-artifact@v4

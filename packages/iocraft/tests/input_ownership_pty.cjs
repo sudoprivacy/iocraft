@@ -7,7 +7,7 @@ const fromHost = name => require(path.join(process.env.IOCRAFT_TERMINAL_MODULES,
 const { Terminal } = fromHost('@xterm/headless');
 const pty = fromHost('node-pty');
 const [fixture, mode, scenario] = process.argv.slice(2);
-assert(fixture && ['bundled', 'system'].includes(mode) && ['clear', 'paste', 'middle-paste', 'clear-paste', 'navigation', 'rendered-cursor', 'resize-boundary'].includes(scenario));
+assert(fixture && ['bundled', 'system'].includes(mode) && ['clear', 'paste', 'middle-paste', 'clear-paste', 'navigation', 'rendered-cursor', 'resize-boundary', 'resize-restore-boundary'].includes(scenario));
 const terminal = new Terminal({ cols: 100, rows: 30, scrollback: 1000, allowProposedApi: true,
   ...(process.platform === 'win32' ? { reflowCursorLine: mode !== 'system',
     windowsPty: { backend: 'conpty', buildNumber: Number(os.release().split('.')[2]) } } : {}) });
@@ -59,16 +59,21 @@ async function stop() {
     await waitFor('InputValue::EndValue');
     child.write('Seed');
     await waitFor('InputValue:Seed:EndValue');
-    if (scenario === 'resize-boundary') {
+    if (scenario === 'resize-boundary' || scenario === 'resize-restore-boundary') {
       terminal.resize(30, 8);
       child.resize(30, 8);
-      // No wait/paint between resize and input. F6 is only an event acknowledgment.
+      if (scenario === 'resize-restore-boundary') await waitFor('Viewport:30x8:blocked');
+      // F6 acknowledges delivery. For the restore case do not wait between
+      // hidden input and growth: those pre-resize keys still own the old frame.
       child.write('MustNotAppear\r\x1b[17~');
-      await waitFor('Viewport:30x8:blocked');
-      await waitFor('BatchAck:1');
+      if (scenario === 'resize-boundary') {
+        await waitFor('Viewport:30x8:blocked');
+        await waitFor('BatchAck:1');
+      }
       terminal.resize(100, 30);
       child.resize(100, 30);
       await waitFor('Viewport:100x30:reviewable');
+      await waitFor('BatchAck:1');
       const latestValue = () => [...screen().matchAll(/InputValue:([^\r\n]*):EndValue/g)].at(-1)?.[1];
       const latestConfirmed = () => [...screen().matchAll(/Confirmed:(\d+)/g)].at(-1)?.[1];
       assert.equal(latestValue(), 'Seed', `${mode}: hidden draft mutated\n${screen()}`);
