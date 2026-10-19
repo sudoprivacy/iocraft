@@ -117,7 +117,7 @@ jobs:
       - name: Install the same terminal model as the Windows host
         run: npm ci --prefix packages/iocraft/tests/terminal-host
       - name: Build the real terminal fixture
-        run: cargo build -p iocraft --example inline_history_fixture
+        run: cargo build -p iocraft --example inline_history_fixture --example input_ownership_fixture
       - name: Check complete history and live frame ownership
         run: |
           mkdir -p "$RUNNER_TEMP/inline-pty-logs"
@@ -128,6 +128,13 @@ jobs:
               target/debug/examples/inline_history_fixture bundled "$scenario" \
               > "$RUNNER_TEMP/inline-pty-logs/$scenario.log" 2>&1
           done
+      - name: Reflow before accepting the next input burst
+        run: |
+          export IOCRAFT_TERMINAL_MODULES="$GITHUB_WORKSPACE/packages/iocraft/tests/terminal-host/node_modules"
+          IOCRAFT_WIRE_TRACE="$RUNNER_TEMP/inline-pty-logs/resize-boundary-wire.jsonl" \
+            node packages/iocraft/tests/input_ownership_pty.cjs \
+            target/debug/examples/input_ownership_fixture bundled resize-boundary \
+            > "$RUNNER_TEMP/inline-pty-logs/resize-boundary.log" 2>&1
       - name: Retain terminal output and wire traces
         if: always()
         uses: actions/upload-artifact@v4

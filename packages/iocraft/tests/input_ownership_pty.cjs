@@ -7,9 +7,10 @@ const fromHost = name => require(path.join(process.env.IOCRAFT_TERMINAL_MODULES,
 const { Terminal } = fromHost('@xterm/headless');
 const pty = fromHost('node-pty');
 const [fixture, mode, scenario] = process.argv.slice(2);
-assert(fixture && ['bundled', 'system'].includes(mode) && ['clear', 'paste', 'middle-paste', 'clear-paste', 'navigation', 'rendered-cursor'].includes(scenario));
+assert(fixture && ['bundled', 'system'].includes(mode) && ['clear', 'paste', 'middle-paste', 'clear-paste', 'navigation', 'rendered-cursor', 'resize-boundary'].includes(scenario));
 const terminal = new Terminal({ cols: 100, rows: 30, scrollback: 1000, allowProposedApi: true,
-  reflowCursorLine: mode !== 'system', windowsPty: { backend: 'conpty', buildNumber: Number(os.release().split('.')[2]) } });
+  ...(process.platform === 'win32' ? { reflowCursorLine: mode !== 'system',
+    windowsPty: { backend: 'conpty', buildNumber: Number(os.release().split('.')[2]) } } : {}) });
 const env = { ...process.env, TERM: 'xterm-256color' };
 delete env.ELECTRON_RUN_AS_NODE;
 delete env.NO_COLOR;
@@ -58,6 +59,29 @@ async function stop() {
     await waitFor('InputValue::EndValue');
     child.write('Seed');
     await waitFor('InputValue:Seed:EndValue');
+    if (scenario === 'resize-boundary') {
+      terminal.resize(30, 8);
+      child.resize(30, 8);
+      // No wait/paint between resize and input. F6 is only an event acknowledgment.
+      child.write('MustNotAppear\r\x1b[17~');
+      await waitFor('Viewport:30x8:blocked');
+      await waitFor('BatchAck:1');
+      terminal.resize(100, 30);
+      child.resize(100, 30);
+      await waitFor('Viewport:100x30:reviewable');
+      const latestValue = () => [...screen().matchAll(/InputValue:([^\r\n]*):EndValue/g)].at(-1)?.[1];
+      const latestConfirmed = () => [...screen().matchAll(/Confirmed:(\d+)/g)].at(-1)?.[1];
+      assert.equal(latestValue(), 'Seed', `${mode}: hidden draft mutated\n${screen()}`);
+      assert.equal(latestConfirmed(), '0', `${mode}: unseen controls confirmed\n${screen()}`);
+      child.write('Kept\r\x1b[17~');
+      await waitFor('BatchAck:2');
+      assert.equal(latestValue(), 'SeedKept', 'focus restored after resize');
+      assert.equal(latestConfirmed(), '1', 'visible controls remain operable');
+      console.log(JSON.stringify({ mode, scenario, expected: 'SeedKept', result: 'PASS' }));
+      await stop();
+      assert.equal(exitCode, 0, 'fixture exit');
+      return;
+    }
     const cases = {
       clear: ['\x15Fresh', 'Fresh'],
       paste: ['\x1b[200~Pasted\x1b[201~Fresh', 'Seed[Pasted]Fresh'],
