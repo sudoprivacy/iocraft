@@ -131,7 +131,7 @@ jobs:
       - name: Reflow before accepting the next input burst
         run: |
           export IOCRAFT_TERMINAL_MODULES="$GITHUB_WORKSPACE/packages/iocraft/tests/terminal-host/node_modules"
-          for scenario in resize-boundary resize-restore-boundary; do
+          for scenario in resize-boundary resize-restore-boundary resize-narrow-burst; do
             IOCRAFT_WIRE_TRACE="$RUNNER_TEMP/inline-pty-logs/$scenario-wire.jsonl" \
               node packages/iocraft/tests/input_ownership_pty.cjs \
               target/debug/examples/input_ownership_fixture bundled "$scenario" \
