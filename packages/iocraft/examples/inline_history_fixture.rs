@@ -10,7 +10,9 @@ fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         ""
     };
     let (first, first_error) = hooks.use_output();
+    let resize_history = first.clone();
     let (second, _) = hooks.use_output();
+    let mut resize_history_written = hooks.use_state(|| false);
     let mut phase = hooks.use_state(|| 0_u32);
     let mut acknowledgment = hooks.use_state(|| 0_u32);
     let mut history_count = hooks.use_state(|| 0_u32);
@@ -65,6 +67,15 @@ fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
         }
     });
+    // Queue durable output in the same component update as height growth.
+    // The flag is supplied only by the dedicated real-terminal regression.
+    if !resize_history_written.get()
+        && std::env::var_os("IOCRAFT_FIXTURE_HISTORY_GATE")
+            .is_some_and(|path| std::path::Path::new(&path).is_file())
+    {
+        resize_history.println("ConcurrentFirst\r\nConcurrentSecond\r\n");
+        resize_history_written.set(true);
+    }
     if done.get() {
         system.exit();
     }

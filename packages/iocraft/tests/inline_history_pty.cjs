@@ -15,12 +15,15 @@ const { Terminal } = fromHost('@xterm/headless');
 const [fixture, mode = 'bundled', resize] = process.argv.slice(2);
 assert(fixture, 'pass an explicitly built fixture executable');
 assert(['bundled', 'system'].includes(mode), `unknown backend: ${mode}`);
-assert(!resize || ['resize', 'rapid', 'interleaved', 'tiny', 'bounded-tiny', 'oversized-history'].includes(resize), `unknown scenario: ${resize}`);
+assert(!resize || ['resize', 'rapid', 'interleaved', 'tiny', 'bounded-tiny', 'history-growth', 'oversized-history'].includes(resize), `unknown scenario: ${resize}`);
 const wireTrace = [];
 const trace = record => {
   if (process.env.IOCRAFT_WIRE_TRACE) wireTrace.push({ time: Date.now(), ...record });
 };
-const terminal = new Terminal({ cols: 240, rows: 40, scrollback: 10000,
+const initialRows = resize === 'history-growth' ? 120 : 40;
+const historyGateRoot = resize === 'history-growth'
+  ? fs.mkdtempSync(path.join(os.tmpdir(), 'iocraft-history-growth-')) : undefined;
+const terminal = new Terminal({ cols: 240, rows: initialRows, scrollback: 10000,
   allowProposedApi: true, reflowCursorLine: mode !== 'system',
   windowsPty: process.platform === 'win32' ? { backend: 'conpty', buildNumber: Number(os.release().split('.')[2]) } : undefined });
 const { Unicode11Addon } = fromHost('@xterm/addon-unicode11');
@@ -33,10 +36,20 @@ console.log(JSON.stringify({ host: { platform: process.platform, release: os.rel
 const env = { ...process.env, TERM: 'xterm-256color' };
 delete env.ELECTRON_RUN_AS_NODE;
 delete env.NO_COLOR;
-const child = pty.spawn(path.resolve(fixture), [], { cols: 240, rows: 40,
+if (historyGateRoot) env.IOCRAFT_FIXTURE_HISTORY_GATE = path.join(historyGateRoot, 'release');
+const child = pty.spawn(path.resolve(fixture), [], { cols: 240, rows: initialRows,
   cwd: path.dirname(path.resolve(fixture)), env, useConpty: true, useConptyDll: mode === 'bundled' });
 let pending = 0, lastData = Date.now(), exited = false;
 let exitCode;
+let frames = 0;
+const presentationObservers = new Set();
+terminal.parser.registerCsiHandler({ prefix: '?', final: 'l' }, params => {
+  if (params.includes(2026)) {
+    frames++;
+    for (const observer of presentationObservers) observer();
+  }
+  return false;
+});
 let lastResize;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 function snapshot() {
@@ -72,12 +85,12 @@ if (process.platform === 'win32') terminal.parser.registerCsiHandler({ final: 'c
   return false;
 });
 child.onExit(event => { exited = true; exitCode = event.exitCode; });
-async function settle(marker, width, notBefore = 0) {
+async function settle(marker, width, notBefore = 0, afterFrame = -1) {
   const start = Date.now();
   while (Date.now() - start < 15000) {
     await sleep(25);
     const text = snapshot();
-    if (!pending && lastData >= notBefore && Date.now() - lastData >= 250 && text.includes(marker)
+    if (!pending && frames > afterFrame && lastData >= notBefore && Date.now() - lastData >= 250 && text.includes(marker)
       && (!width || text.split('\n').includes('─'.repeat(width)))) return;
     assert(!exited, `fixture exited while waiting for ${marker}`);
   }
@@ -101,24 +114,45 @@ function check(label, phase, committed) {
 }
 (async () => {
   try {
-    await settle('FooterMarker p0 a0 240x40');
+    await settle(`FooterMarker p0 a0 240x${initialRows}`);
     child.write('DraftSurvives');
     await settle('DraftSurvives');
     check('initial', 0, []);
     child.write('\x1bOQ'); // F2, first hook leaves an unfinished line.
-    await settle('FooterMarker p2 a0 240x40');
+    await settle(`FooterMarker p2 a0 240x${initialRows}`);
     check('partial', 2, ['SharedPartial']);
     child.write('\x1bOR'); // F3, independent hook must continue that line.
-    await settle('FooterMarker p3 a0 240x40');
+    await settle(`FooterMarker p3 a0 240x${initialRows}`);
     check('cross-hook continuation', 3, ['SharedPartialJoined']);
     child.write('\x1bOS'); // F4, two hook batches in one frame.
-    await settle('FooterMarker p4 a0 240x40');
+    await settle(`FooterMarker p4 a0 240x${initialRows}`);
     check('same-frame batches', 4, ['SharedPartialJoined', 'SameBatch:end']);
     child.write('\x1b[15~'); // F5, buffered stdout followed by stderr.
-    await settle('FooterMarker p5 a0 240x40');
+    await settle(`FooterMarker p5 a0 240x${initialRows}`);
     const committed = ['SharedPartialJoined', 'SameBatch:end', 'StdoutPrefix:StderrSuffix'];
     check('cross-stream order', 5, committed);
-    if (resize === 'oversized-history') {
+    if (resize === 'history-growth') {
+      const before = frames, started = Date.now();
+      let firstGrowthFrame;
+      const observe = () => {
+        const text = snapshot();
+        if (firstGrowthFrame === undefined && text.includes('FooterMarker p5 a0 240x160'))
+          firstGrowthFrame = text;
+      };
+      presentationObservers.add(observe);
+      trace({ resize: [240,160] });
+      terminal.resize(240,160); child.resize(240,160);
+      fs.writeFileSync(env.IOCRAFT_FIXTURE_HISTORY_GATE, 'release');
+      await settle('FooterMarker p5 a0 240x160', 240, started, before);
+      check('history during growth', 5, [...committed, 'ConcurrentFirst', 'ConcurrentSecond']);
+      presentationObservers.delete(observe);
+      assert(firstGrowthFrame?.includes('ConcurrentFirst') && firstGrowthFrame?.includes('ConcurrentSecond'),
+        'history must join the first resized presentation');
+      const lines = snapshot().split('\n');
+      const lastBody = lines.findIndex(row => row.trim() === 'ConcurrentSecond');
+      const status = lines.findIndex(row => row.includes('StatusMarker'));
+      assert.equal(status, lastBody + 2, 'history must remain adjacent to live chrome');
+    } else if (resize === 'oversized-history') {
       // A large live panel can exceed the viewport without any terminal resize.
       // Closing it must preserve shell history and earlier committed output.
       // This data-retention check does not waive the strict resize matrix above.
@@ -197,6 +231,7 @@ function check(label, phase, committed) {
     }
     if (!exited) child.kill();
     terminal.dispose();
+    if (historyGateRoot) fs.rmSync(historyGateRoot, { recursive: true, force: true });
     // Synchronous disk writes between frontend and PTY resize artificially
     // separate their geometry changes, especially across Docker bind mounts.
     // Keep the original timestamps and write the complete trace after the run.

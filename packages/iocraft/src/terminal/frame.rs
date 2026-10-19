@@ -73,7 +73,7 @@ impl PresentationState {
         output: Output,
         canvas: Canvas,
     ) -> io::Result<()> {
-        self.commit_history(backend, output)?;
+        self.commit_history(backend, output, canvas.height())?;
         if self.needs_presentation(&canvas) {
             backend.write_canvas(self.previous.as_ref(), &canvas)?;
         }
@@ -82,11 +82,17 @@ impl PresentationState {
         Ok(())
     }
 
-    fn commit_history(&mut self, backend: &mut dyn TerminalImpl, output: Output) -> io::Result<()> {
+    fn commit_history(
+        &mut self,
+        backend: &mut dyn TerminalImpl,
+        output: Output,
+        next_height: usize,
+    ) -> io::Result<()> {
         if self.pending.is_empty() {
             return Ok(());
         }
         self.clear(backend)?;
+        backend.prepare_history(next_height, self.appended_newline.is_none())?;
         let mut unfinished = self.appended_newline.is_some();
         if let Some(column) = self.appended_newline.take() {
             backend

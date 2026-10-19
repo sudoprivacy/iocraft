@@ -182,6 +182,9 @@ trait TerminalImpl: Write + Send {
         Ok(())
     }
     fn set_history_blank_anchor(&mut self, _available: bool) {}
+    fn prepare_history(&mut self, _next_height: usize, _can_relocate: bool) -> io::Result<()> {
+        Ok(())
+    }
     fn clear_canvas(&mut self) -> io::Result<()>;
     fn write_canvas(&mut self, prev: Option<&Canvas>, canvas: &Canvas) -> io::Result<()>;
     fn event_stream(&mut self) -> io::Result<BoxStream<'static, io::Result<TerminalEvent>>>;
@@ -492,6 +495,10 @@ impl TerminalImpl for StdTerminal<'_> {
         self.history_blank_anchor = available;
     }
 
+    fn prepare_history(&mut self, next_height: usize, can_relocate: bool) -> io::Result<()> {
+        self.reanchor_inline(next_height, can_relocate)
+    }
+
     fn clear_canvas(&mut self) -> io::Result<()> {
         if self.prev_canvas_height == 0 {
             return Ok(());
@@ -549,19 +556,8 @@ impl TerminalImpl for StdTerminal<'_> {
             if self.fullscreen {
                 self.prev_canvas_top_row = 0;
                 self.dest.queue(cursor::MoveTo(0, 0))?;
-            } else if let Some(top) = self.inline_reanchor_row.take() {
-                // A height increase leaves blank rows below the old cursor.
-                // Keep the live frame near the bottom of that cleared space,
-                // so a later width shrink cannot reflow it into scrollback
-                // merely because the cursor remained in the old short viewport.
-                let bottom_top = self.size.map_or(0, |(_, height)| {
-                    usize::from(height).saturating_sub(canvas.height() + 1)
-                });
-                if bottom_top > usize::from(top) {
-                    self.dest.queue(cursor::MoveToNextLine(
-                        (bottom_top - usize::from(top)) as u16,
-                    ))?;
-                }
+            } else {
+                self.reanchor_inline(canvas.height(), true)?;
             }
             self.prev_canvas_height = canvas.height() as _;
             self.prev_size_on_write = self.size;
@@ -733,6 +729,24 @@ impl TerminalImpl for StdTerminal<'_> {
 }
 
 impl<'a> StdTerminal<'a> {
+    fn reanchor_inline(&mut self, height: usize, can_relocate: bool) -> io::Result<()> {
+        if let Some(top) = self.inline_reanchor_row.take() {
+            // Place the complete history/live transaction before history
+            // advances the cursor. Never relocate an unfinished history line.
+            if can_relocate {
+                let bottom_top = self
+                    .size
+                    .map_or(0, |(_, rows)| usize::from(rows).saturating_sub(height + 1));
+                if bottom_top > usize::from(top) {
+                    self.dest.queue(cursor::MoveToNextLine(
+                        (bottom_top - usize::from(top)) as u16,
+                    ))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn retain_unlocated_inline_frame(&mut self) -> io::Result<()> {
         self.history_blank_anchor = false;
         for _ in 0..self.size.map_or(1, |(_, height)| height) {
@@ -2443,6 +2457,54 @@ mod tests {
                 assert_eq!(text.matches(marker).count(), 1, "{cols} columns: {text}");
             }
         }
+    }
+
+    #[test]
+    fn resize_and_history_handoff_keep_the_finished_body_next_to_the_live_frame() {
+        let (dest, bytes) = new_test_writer();
+        let mut term = new_inline_term_with_size(dest, 0, (40, 20));
+        let mut vt = avt::Vt::new(40, 20);
+        vt.feed_str("CallerHistory\r\n");
+        let canvas = element!(Text(content: "StatusMarker\nDraftKept")).render(Some(40));
+        let mut presentation = PresentationState::default();
+        presentation
+            .present(&mut term, Output::Stdout, canvas.clone())
+            .unwrap();
+        term.end_frame().unwrap();
+        vt.feed_str(&String::from_utf8(std::mem::take(&mut *bytes.lock().unwrap())).unwrap());
+
+        vt.resize(40, 40);
+        term.size = Some((40, 40));
+        term.resize_cursor = Some((vt.cursor().col as u16, vt.cursor().row as u16));
+        presentation.begin_frame(&mut term).unwrap();
+        presentation.enqueue([HistoryMessage::StdoutNoNewline(
+            "FinalFirst\r\nFinalSecond\r\n\r\n".into(),
+        )]);
+        presentation
+            .present(&mut term, Output::Stdout, canvas)
+            .unwrap();
+        term.end_frame().unwrap();
+        let frame = String::from_utf8(std::mem::take(&mut *bytes.lock().unwrap())).unwrap();
+        assert!(!frame.contains("\x1b[3J"));
+        vt.feed_str(&frame);
+        let rows = vt.text();
+        let text = rows.join("\n");
+        for marker in ["FinalFirst", "FinalSecond", "StatusMarker", "DraftKept"] {
+            assert_eq!(text.matches(marker).count(), 1, "{text}");
+        }
+        let body = rows
+            .iter()
+            .position(|row| row.contains("FinalSecond"))
+            .unwrap();
+        let status = rows
+            .iter()
+            .position(|row| row.contains("StatusMarker"))
+            .unwrap();
+        assert_eq!(
+            status,
+            body + 2,
+            "history and live frame must remain adjacent"
+        );
     }
 
     #[test]
