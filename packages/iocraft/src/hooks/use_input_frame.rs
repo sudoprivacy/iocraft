@@ -1,4 +1,5 @@
-use crate::{Hooks, InputFrame};
+use crate::{hooks::UseMemo, input_frame::InputContinuity, Hooks, InputFrame};
+use std::sync::{Arc, Mutex};
 
 mod private {
     pub trait Sealed {}
@@ -13,9 +14,12 @@ pub trait UseInputFrame: private::Sealed {
 
 impl UseInputFrame for Hooks<'_, '_> {
     fn use_input_frame(&mut self) -> InputFrame {
-        self.context_stack
+        let frame = self
+            .context_stack
             .and_then(|stack| stack.get_context::<InputFrame>())
             .map(|frame| frame.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let continuity = self.use_memo(Arc::<Mutex<InputContinuity>>::default, ());
+        frame.for_control(continuity)
     }
 }

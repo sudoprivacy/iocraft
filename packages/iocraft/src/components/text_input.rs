@@ -392,6 +392,7 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
     let auto_grow = props.auto_grow && multiline;
     let has_focus = props.has_focus;
     let input_frame = hooks.use_input_frame();
+    input_frame.set_enabled(has_focus);
     let wrap = if multiline {
         TextWrap::Wrap
     } else {

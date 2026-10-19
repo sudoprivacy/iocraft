@@ -135,9 +135,9 @@ jobs:
       - name: Reflow before accepting the next input burst
         run: |
           export IOCRAFT_TERMINAL_MODULES="$GITHUB_WORKSPACE/packages/iocraft/tests/terminal-host/node_modules"
-          scenarios="resize-boundary resize-restore-boundary resize-narrow-burst"
+          scenarios="resize-boundary resize-restore-boundary resize-narrow-burst resize-visible-burst"
           if [ "$RUNNER_OS" = Linux ]; then
-            scenarios="$scenarios resize-pending-burst resize-pending-restore"
+            scenarios="$scenarios resize-pending-burst resize-pending-restore resize-pending-visible"
           fi
           for scenario in $scenarios; do
             IOCRAFT_WIRE_TRACE="$RUNNER_TEMP/inline-pty-logs/$scenario-wire.jsonl" \
