@@ -39,10 +39,10 @@ terminal.parser.registerCsiHandler({ final: 'c' }, params => {
   }
   return false;
 });
-async function waitFor(text) {
+async function waitFor(text, settled = true) {
   const until = Date.now() + 15000;
   while (Date.now() < until) {
-    if (!pending && Date.now() - lastData > 250 && viewport().includes(text)) return;
+    if (!pending && (!settled || Date.now() - lastData > 250) && viewport().includes(text)) return;
     assert(!exited, `fixture exited before ${text}`);
     await sleep(20);
   }
@@ -61,8 +61,18 @@ async function stop() {
 (async () => {
   try {
     await waitFor('InputValue::EndValue');
-    child.write('Seed');
-    await waitFor('InputValue:Seed:EndValue');
+    const narrowBurst = scenario === 'resize-narrow-burst';
+    const seed = narrowBurst ? 'DraftHeadTail' : 'Seed';
+    child.write(seed);
+    await waitFor(`InputValue:${seed}:EndValue`, !narrowBurst);
+    if (narrowBurst) {
+      // Match the real CLI's middle-cursor preparation. Observe rendered text,
+      // but do not insert a quiet-period barrier before the critical resize.
+      child.write('\x1b[H\x1b[C\x1b[C\x1b[C\x1b[C\x1b[CX');
+      await waitFor('InputValue:DraftXHeadTail:EndValue', false);
+      child.write('\x7f');
+      await waitFor('InputValue:DraftHeadTail:EndValue', false);
+    }
     if (scenario === 'resize-boundary' || scenario === 'resize-restore-boundary' || scenario === 'resize-narrow-burst') {
       const narrow = scenario === 'resize-narrow-burst';
       const width = narrow ? 12 : 30;
@@ -71,7 +81,7 @@ async function stop() {
       if (scenario === 'resize-restore-boundary') await waitFor('Viewport:30x8:blocked');
       // F6 acknowledges delivery. For the restore case do not wait between
       // hidden input and growth: those pre-resize keys still own the old frame.
-      child.write('MustNotAppear\r' + (narrow ? '' : '\x1b[17~'));
+      child.write('MustNotAppear' + (narrow ? '' : '\r\x1b[17~'));
       if (narrow) await waitFor('Focus:off');
       if (scenario === 'resize-boundary') {
         await waitFor('Viewport:30x8:blocked');
@@ -88,13 +98,14 @@ async function stop() {
       await waitFor(`BatchAck:${restoredAck}`);
       const latestValue = () => [...viewport().matchAll(/InputValue:([^\r\n]*):EndValue/g)].at(-1)?.[1];
       const latestConfirmed = () => [...viewport().matchAll(/Confirmed:(\d+)/g)].at(-1)?.[1];
-      assert.equal(latestValue(), 'Seed', `${mode}: hidden draft mutated\n${screen()}`);
+      assert.equal(latestValue(), seed, `${mode}: hidden draft mutated\n${screen()}`);
       assert.equal(latestConfirmed(), '0', `${mode}: unseen controls confirmed\n${screen()}`);
       child.write('Kept\r\x1b[17~');
       await waitFor(`BatchAck:${restoredAck + 1}`);
-      assert.equal(latestValue(), 'SeedKept', 'focus restored after resize');
+      const expected = narrow ? 'DraftKeptHeadTail' : 'SeedKept';
+      assert.equal(latestValue(), expected, 'focus restored after resize');
       assert.equal(latestConfirmed(), '1', 'visible controls remain operable');
-      console.log(JSON.stringify({ mode, scenario, expected: 'SeedKept', result: 'PASS' }));
+      console.log(JSON.stringify({ mode, scenario, expected, result: 'PASS' }));
       await stop();
       assert.equal(exitCode, 0, 'fixture exit');
       return;
