@@ -369,4 +369,24 @@ mod tests {
         observe(&state, LARGE);
         assert!(new.is_current());
     }
+
+    #[test]
+    fn another_owner_cannot_authorize_deferred_input() {
+        let state = Arc::<Mutex<InputFrameState>>::default();
+        let active = Arc::<Mutex<InputContinuity>>::default();
+        let inactive = Arc::<Mutex<InputContinuity>>::default();
+        let frame = InputFrame::begin(state.clone(), LARGE);
+        frame.for_control(active.clone());
+        frame.for_control(inactive.clone()).set_enabled(false);
+        state.lock().unwrap().present();
+        let size = Some((94, 30));
+        let observation = state.lock().unwrap().sample(size);
+        let frame = InputFrame::begin(state.clone(), size);
+        let active = frame.for_control(active);
+        let inactive = frame.for_control(inactive);
+        state.lock().unwrap().present();
+        state.lock().unwrap().observe(observation);
+        assert!(active.is_current());
+        assert!(!inactive.is_current());
+    }
 }

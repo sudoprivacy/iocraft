@@ -9,6 +9,9 @@ mod private {
 /// Access to the current component's presented input frame.
 pub trait UseInputFrame: private::Sealed {
     /// Returns a frame guard for use inside keyboard/paste event callbacks.
+    /// Call in stable hook order on every render. Custom input owners should
+    /// call `set_enabled` with their focus/reviewability before presentation;
+    /// TextInput does that automatically. Cancellation can bypass the guard.
     fn use_input_frame(&mut self) -> InputFrame;
 }
 
