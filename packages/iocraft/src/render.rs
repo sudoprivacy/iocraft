@@ -521,10 +521,20 @@ impl<'a> Tree<'a> {
                 // position, including when there are no new terminal events.
                 continue;
             }
-            if let Either::Right((result, _)) =
+            let terminal_woke = if let Either::Right((result, _)) =
                 select(self.root_component.wait().boxed(), term.wait().boxed()).await
             {
                 result?;
+                true
+            } else {
+                false
+            };
+            if terminal_woke && !term.received_ctrl_c() {
+                // The pump stops at Resize. Dispatch the bounded batch before
+                // that boundary with the callbacks/focus the user last saw,
+                // before refresh_size/render installs a new frame. Post-resize
+                // keys stay in the event stream until that frame is presented.
+                let _ = self.root_component.wait().now_or_never();
             }
             if self.system_context.should_exit() || term.received_ctrl_c() {
                 break;
