@@ -962,7 +962,8 @@ impl<'a> Terminal<'a> {
             Some(event_stream) => {
                 while let Some(event) = event_stream.next().await {
                     let event = event?;
-                    if matches!(event, TerminalEvent::Resize(..)) {
+                    let resized = matches!(event, TerminalEvent::Resize(..));
+                    if resized {
                         self.inner.invalidate_geometry();
                     }
                     if !self.ignore_ctrl_c {
@@ -990,6 +991,14 @@ impl<'a> Terminal<'a> {
                             false
                         }
                     });
+                    if resized {
+                        // Geometry is a dispatch boundary, not merely another
+                        // queued callback. Reflow and draw through the existing
+                        // render loop before delivering later input; otherwise
+                        // children and parent callbacks still own old focus and
+                        // visibility for the entire ready event batch.
+                        return Ok(());
+                    }
                 }
                 Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
@@ -1432,7 +1441,7 @@ mod tests {
         let mut setup = Vec::new();
         write!(setup, "log\r\n").unwrap();
         prev.write_ansi_without_final_newline(&mut setup).unwrap();
-        setup.extend_from_slice(&*diff_buf.lock().unwrap());
+        setup.extend_from_slice(&diff_buf.lock().unwrap());
 
         let mut vt = avt::Vt::new(10, 5);
         vt.feed_str(&String::from_utf8(setup).unwrap());
@@ -1466,7 +1475,7 @@ mod tests {
         canvas.write_ansi_without_final_newline(&mut setup).unwrap();
         write!(setup, "\r\ntail").unwrap();
         setup.queue(cursor::MoveTo(0, 0)).unwrap();
-        setup.extend_from_slice(&*clear_buf.lock().unwrap());
+        setup.extend_from_slice(&clear_buf.lock().unwrap());
 
         let mut vt = avt::Vt::new(10, 5);
         vt.feed_str(&String::from_utf8(setup).unwrap());
@@ -1569,7 +1578,7 @@ mod tests {
         // Build vt: render prev, then apply diff output.
         let mut setup = Vec::new();
         prev.write_ansi_without_final_newline(&mut setup).unwrap();
-        setup.extend_from_slice(&*diff_buf.lock().unwrap());
+        setup.extend_from_slice(&diff_buf.lock().unwrap());
 
         let mut vt = avt::Vt::new(10, 5);
         vt.feed_str(&String::from_utf8(setup).unwrap());
@@ -1601,7 +1610,7 @@ mod tests {
 
         let mut setup = Vec::new();
         prev.write_ansi_without_final_newline(&mut setup).unwrap();
-        setup.extend_from_slice(&*diff_buf.lock().unwrap());
+        setup.extend_from_slice(&diff_buf.lock().unwrap());
 
         let mut vt = avt::Vt::new(10, 5);
         vt.feed_str(&String::from_utf8(setup).unwrap());
@@ -1638,7 +1647,7 @@ mod tests {
 
         let mut setup = Vec::new();
         prev.write_ansi_without_final_newline(&mut setup).unwrap();
-        setup.extend_from_slice(&*diff_buf.lock().unwrap());
+        setup.extend_from_slice(&diff_buf.lock().unwrap());
 
         let mut vt = avt::Vt::new(10, 5);
         vt.feed_str(&String::from_utf8(setup).unwrap());
@@ -1712,7 +1721,7 @@ mod tests {
             write!(setup, "line{i}\r\n").unwrap();
         }
         prev.write_ansi_without_final_newline(&mut setup).unwrap();
-        setup.extend_from_slice(&*diff_buf.lock().unwrap());
+        setup.extend_from_slice(&diff_buf.lock().unwrap());
 
         let mut vt = avt::Vt::new(10, vt_rows);
         vt.feed_str(&String::from_utf8(setup).unwrap());
@@ -1798,7 +1807,7 @@ mod tests {
 
         let mut setup = Vec::new();
         prev.write_ansi_without_final_newline(&mut setup).unwrap();
-        setup.extend_from_slice(&*diff_buf.lock().unwrap());
+        setup.extend_from_slice(&diff_buf.lock().unwrap());
 
         let mut vt = avt::Vt::new(10, 5);
         vt.feed_str(&String::from_utf8(setup).unwrap());
@@ -1842,7 +1851,7 @@ mod tests {
 
         let mut setup = Vec::new();
         prev.write_ansi_without_final_newline(&mut setup).unwrap();
-        setup.extend_from_slice(&*diff_buf.lock().unwrap());
+        setup.extend_from_slice(&diff_buf.lock().unwrap());
 
         let mut vt = avt::Vt::new(10, 5);
         vt.feed_str(&String::from_utf8(setup).unwrap());
@@ -1987,7 +1996,7 @@ mod tests {
 
         let mut setup = Vec::new();
         c1.write_ansi_without_final_newline(&mut setup).unwrap();
-        setup.extend_from_slice(&*buf.lock().unwrap());
+        setup.extend_from_slice(&buf.lock().unwrap());
 
         let mut vt = avt::Vt::new(10, 6);
         vt.feed_str(&String::from_utf8(setup).unwrap());
@@ -2030,7 +2039,7 @@ mod tests {
 
         let mut setup = Vec::new();
         c1.write_ansi_without_final_newline(&mut setup).unwrap();
-        setup.extend_from_slice(&*buf.lock().unwrap());
+        setup.extend_from_slice(&buf.lock().unwrap());
 
         let mut vt = avt::Vt::new(10, 6);
         vt.feed_str(&String::from_utf8(setup).unwrap());
@@ -2107,7 +2116,7 @@ mod tests {
         // then apply the diff on top.
         let mut setup = Vec::new();
         prev.write_ansi_without_final_newline(&mut setup).unwrap();
-        setup.extend_from_slice(&*buf.lock().unwrap());
+        setup.extend_from_slice(&buf.lock().unwrap());
 
         let mut vt = avt::Vt::new(width, height + 2);
         vt.feed_str(&String::from_utf8(setup).unwrap());
@@ -2144,7 +2153,7 @@ mod tests {
 
         let mut setup = Vec::new();
         prev.write_ansi_without_final_newline(&mut setup).unwrap();
-        setup.extend_from_slice(&*buf.lock().unwrap());
+        setup.extend_from_slice(&buf.lock().unwrap());
 
         let mut vt = avt::Vt::new(width, height + 4);
         vt.feed_str(&String::from_utf8(setup).unwrap());

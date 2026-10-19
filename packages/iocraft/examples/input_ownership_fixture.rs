@@ -3,9 +3,12 @@ use iocraft::prelude::*;
 
 #[component]
 fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let (width, height) = hooks.use_terminal_size();
+    let reviewable = width >= 40 && height >= 12;
     let mut value = hooks.use_state(String::new);
     let mut exit = hooks.use_state(|| false);
     let mut acknowledgment = hooks.use_state(|| 0_u32);
+    let mut confirmed = hooks.use_state(|| 0_u32);
     let mut system = hooks.use_context_mut::<SystemContext>();
     hooks.use_terminal_events(move |event| {
         if let TerminalEvent::Key(KeyEvent {
@@ -17,6 +20,7 @@ fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             match code {
                 KeyCode::Esc => exit.set(true),
                 KeyCode::F(6) => acknowledgment.set(acknowledgment.get() + 1),
+                KeyCode::Enter if reviewable => confirmed.set(confirmed.get() + 1),
                 _ => {}
             }
         }
@@ -41,12 +45,14 @@ fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     });
     element! {
         View(flex_direction: FlexDirection::Column) {
+            Text(content: format!("Viewport:{width}x{height}:{}", if reviewable { "reviewable" } else { "blocked" }))
             Text(content: format!("InputValue:{}:EndValue", value.read().as_str()))
             Text(content: format!("BatchAck:{}", acknowledgment.get()))
+            Text(content: format!("Confirmed:{}", confirmed.get()))
             View(width: 80, height: 1) {
                 TextInput(
                     value: value.to_string(),
-                    has_focus: true,
+                    has_focus: reviewable,
                     on_change: move |text| value.set(text),
                     on_edit: Some(on_edit),
                 )
