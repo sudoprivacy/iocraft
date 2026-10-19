@@ -369,9 +369,17 @@ impl<'a> Tree<'a> {
         }
     }
 
-    fn render(&mut self, max_width: Option<usize>, terminal: Option<&mut Terminal<'_>>) -> Canvas {
+    fn render(
+        &mut self,
+        max_width: Option<usize>,
+        mut terminal: Option<&mut Terminal<'_>>,
+    ) -> Canvas {
         let terminal_size =
             crate::context::TerminalSizeSnapshot(terminal.as_ref().and_then(|term| term.size()));
+        let input_frame = terminal
+            .as_mut()
+            .map(|term| term.begin_input_frame())
+            .unwrap_or_default();
         let mut wrapper_child_node_ids = vec![self.root_component.node_id()];
         {
             let mut context = UpdateContext {
@@ -382,11 +390,16 @@ impl<'a> Tree<'a> {
             component_context_stack.with_context(
                 Some(crate::Context::from_ref(&terminal_size)),
                 |component_context_stack| {
-                    self.root_component.update(
-                        &mut context,
-                        &mut wrapper_child_node_ids,
-                        component_context_stack,
-                        self.root_component_props.borrow(),
+                    component_context_stack.with_context(
+                        Some(crate::Context::from_ref(&input_frame)),
+                        |component_context_stack| {
+                            self.root_component.update(
+                                &mut context,
+                                &mut wrapper_child_node_ids,
+                                component_context_stack,
+                                self.root_component_props.borrow(),
+                            );
+                        },
                     );
                 },
             );
@@ -498,6 +511,7 @@ impl<'a> Tree<'a> {
                 term.end_frame()?;
                 Ok(())
             })?;
+            term.present_input_frame();
             last_render_size = terminal_size;
             if let Some(requested) = self.system_context.mouse_capture() {
                 if mouse_capture_enabled != Some(requested) {

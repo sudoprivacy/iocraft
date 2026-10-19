@@ -7,7 +7,7 @@ const fromHost = name => require(path.join(process.env.IOCRAFT_TERMINAL_MODULES,
 const { Terminal } = fromHost('@xterm/headless');
 const pty = fromHost('node-pty');
 const [fixture, mode, scenario] = process.argv.slice(2);
-assert(fixture && ['bundled', 'system'].includes(mode) && ['clear', 'paste', 'middle-paste', 'clear-paste', 'navigation', 'rendered-cursor', 'resize-boundary', 'resize-restore-boundary', 'resize-narrow-burst'].includes(scenario));
+assert(fixture && ['bundled', 'system'].includes(mode) && ['clear', 'paste', 'middle-paste', 'clear-paste', 'navigation', 'rendered-cursor', 'resize-boundary', 'resize-restore-boundary', 'resize-narrow-burst', 'resize-pending-burst', 'resize-pending-restore'].includes(scenario));
 const terminal = new Terminal({ cols: 100, rows: 30, scrollback: 1000, allowProposedApi: true,
   ...(process.platform === 'win32' ? { reflowCursorLine: mode !== 'system',
     windowsPty: { backend: 'conpty', buildNumber: Number(os.release().split('.')[2]) } } : {}) });
@@ -17,6 +17,38 @@ delete env.NO_COLOR;
 const child = pty.spawn(path.resolve(fixture), [], { cols: 100, rows: 30,
   cwd: path.dirname(path.resolve(fixture)), env, useConpty: true, useConptyDll: mode === 'bundled' });
 let pending = 0, lastData = Date.now(), exited = false, exitCode;
+const pausedScenario = scenario === 'resize-pending-burst' || scenario === 'resize-pending-restore';
+let paused = false;
+function ownedIdentity() {
+  const stat = fs.readFileSync(`/proc/${child.pid}/stat`, 'utf8');
+  const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
+  return { state: fields[0], parent: fields[1], birth: fields[19] };
+}
+assert(!pausedScenario || process.platform === 'linux', 'pending-readiness probes require Linux /proc identity');
+const originalIdentity = pausedScenario ? ownedIdentity() : null;
+function signalOwned(signal) {
+  assert(!exited, 'fixture already exited');
+  const current = ownedIdentity();
+  assert.equal(current.birth, originalIdentity.birth, 'fixture PID was reused');
+  assert.equal(current.parent, originalIdentity.parent, 'fixture ownership changed');
+  process.kill(child.pid, signal);
+}
+async function pauseOwned() {
+  signalOwned('SIGSTOP');
+  paused = true;
+  const until = Date.now() + 1000;
+  while (Date.now() < until) {
+    if (ownedIdentity().state === 'T') return;
+    await sleep(10);
+  }
+  throw new Error('owned fixture did not stop');
+}
+function resumeOwned() {
+  if (paused) {
+    signalOwned('SIGCONT');
+    paused = false;
+  }
+}
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 function screen() {
   const b = terminal.buffer.active;
@@ -61,7 +93,7 @@ async function stop() {
 (async () => {
   try {
     await waitFor('InputValue::EndValue');
-    const narrowBurst = scenario === 'resize-narrow-burst';
+    const narrowBurst = scenario === 'resize-narrow-burst' || pausedScenario;
     const seed = narrowBurst ? 'DraftHeadTail' : 'Seed';
     child.write(seed);
     await waitFor(`InputValue:${seed}:EndValue`, !narrowBurst);
@@ -73,22 +105,32 @@ async function stop() {
       child.write('\x7f');
       await waitFor('InputValue:DraftHeadTail:EndValue', false);
     }
-    if (scenario === 'resize-boundary' || scenario === 'resize-restore-boundary' || scenario === 'resize-narrow-burst') {
-      const narrow = scenario === 'resize-narrow-burst';
+    if (scenario === 'resize-boundary' || scenario === 'resize-restore-boundary' || narrowBurst) {
+      const narrow = narrowBurst;
       const width = narrow ? 12 : 30;
+      if (scenario === 'resize-pending-burst') {
+        await waitFor('InputValue:DraftHeadTail:EndValue');
+        await pauseOwned();
+      }
       terminal.resize(width, 8);
       child.resize(width, 8);
       if (scenario === 'resize-restore-boundary') await waitFor('Viewport:30x8:blocked');
+      if (scenario === 'resize-pending-restore') {
+        await waitFor('Focus:off');
+        await pauseOwned();
+      }
       // F6 acknowledges delivery. For the restore case do not wait between
       // hidden input and growth: those pre-resize keys still own the old frame.
       child.write('MustNotAppear' + (narrow ? '' : '\r\x1b[17~'));
-      if (narrow) await waitFor('Focus:off');
+      if (scenario === 'resize-pending-burst') resumeOwned();
+      if (narrow && scenario !== 'resize-pending-restore') await waitFor('Focus:off');
       if (scenario === 'resize-boundary') {
         await waitFor('Viewport:30x8:blocked');
         await waitFor('BatchAck:1');
       }
       terminal.resize(100, 30);
       child.resize(100, 30);
+      resumeOwned();
       // A restored size marker may also exist in scrollback from startup.
       // Require a fresh, non-editing acknowledgment in the actual viewport;
       // the critical resize/input burst above remains unsynchronized.
@@ -130,5 +172,5 @@ async function stop() {
     console.log(JSON.stringify({ mode, scenario, expected, result: 'PASS' }));
     await stop();
     assert.equal(exitCode, 0, 'fixture exit');
-  } finally { await stop(); terminal.dispose(); }
+  } finally { resumeOwned(); await stop(); terminal.dispose(); }
 })().then(() => process.exit(0)).catch(error => { console.error(error); process.exit(1); });

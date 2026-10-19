@@ -2,7 +2,7 @@ use crate::{
     component,
     components::{TextDecoration, TextDrawer, TextWrap, View},
     element,
-    hooks::{Ref, State, UseComponentRect, UseMemo, UseState, UseTerminalEvents},
+    hooks::{Ref, State, UseComponentRect, UseInputFrame, UseMemo, UseState, UseTerminalEvents},
     segmented_string::SegmentedString,
     AnyElement, CanvasTextStyle, Color, Component, ComponentDrawer, ComponentUpdater, HandlerMut,
     Hooks, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, LayoutStyle, Overflow, Position, Props,
@@ -391,6 +391,7 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
     let multiline = props.multiline;
     let auto_grow = props.auto_grow && multiline;
     let has_focus = props.has_focus;
+    let input_frame = hooks.use_input_frame();
     let wrap = if multiline {
         TextWrap::Wrap
     } else {
@@ -516,7 +517,7 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
         let mut on_paste = props.on_paste.take();
         let mut on_edit = props.on_edit.take();
         move |event| {
-            if !has_focus {
+            if !has_focus || !input_frame.is_current() {
                 return;
             }
             // Edit the cursor's owning value in place. The controlled-parent

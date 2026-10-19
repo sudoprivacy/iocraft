@@ -1,4 +1,9 @@
-use crate::{canvas::Canvas, element::Output};
+use crate::{
+    canvas::Canvas,
+    element::Output,
+    input_frame::{InputFrameState, InputObservation},
+    InputFrame,
+};
 use crossterm::{
     cursor,
     event::{self, Event, EventStream},
@@ -99,14 +104,21 @@ pub enum TerminalEvent {
     Paste(String),
 }
 
+#[derive(Clone)]
+struct ObservedEvent {
+    event: TerminalEvent,
+    observation: InputObservation,
+}
+
 struct TerminalEventsInner {
-    pending: VecDeque<TerminalEvent>,
+    pending: VecDeque<ObservedEvent>,
     waker: Option<Waker>,
 }
 
 /// A stream of terminal events.
 pub struct TerminalEvents {
     inner: Arc<Mutex<TerminalEventsInner>>,
+    input_frames: Arc<Mutex<InputFrameState>>,
 }
 
 impl Stream for TerminalEvents {
@@ -115,7 +127,9 @@ impl Stream for TerminalEvents {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         let mut inner = self.inner.lock().unwrap();
         if let Some(event) = inner.pending.pop_front() {
-            Poll::Ready(Some(event))
+            drop(inner);
+            self.input_frames.lock().unwrap().observe(event.observation);
+            Poll::Ready(Some(event.event))
         } else {
             inner.waker = Some(cx.waker().clone());
             Poll::Pending
@@ -817,6 +831,7 @@ pub(crate) struct Terminal<'a> {
     subscribers: Vec<Weak<Mutex<TerminalEventsInner>>>,
     received_ctrl_c: bool,
     ignore_ctrl_c: bool,
+    input_frames: Arc<Mutex<InputFrameState>>,
 }
 
 impl<'a> Terminal<'a> {
@@ -840,6 +855,7 @@ impl<'a> Terminal<'a> {
             subscribers: Vec::new(),
             received_ctrl_c: false,
             ignore_ctrl_c: false,
+            input_frames: Arc::default(),
         })
     }
 
@@ -885,6 +901,14 @@ impl<'a> Terminal<'a> {
                 Ok(())
             });
         }
+    }
+
+    pub fn begin_input_frame(&mut self) -> InputFrame {
+        InputFrame::begin(self.input_frames.clone(), self.size())
+    }
+
+    pub fn present_input_frame(&mut self) {
+        self.input_frames.lock().unwrap().present();
     }
 
     pub fn resize_pending(&self) -> bool {
@@ -979,6 +1003,17 @@ impl<'a> Terminal<'a> {
                             return Ok(());
                         }
                     }
+                    // Observe input against the actual terminal, not only the
+                    // last Resize event: Unix readiness can deliver bytes first.
+                    // Do not run cursor queries or reorder/drop the input here.
+                    let size = if matches!(event, TerminalEvent::Key(_) | TerminalEvent::Paste(_)) {
+                        self.inner.refresh_size();
+                        self.inner.size()
+                    } else {
+                        None
+                    };
+                    let observation = self.input_frames.lock().unwrap().sample(size);
+                    let event = ObservedEvent { event, observation };
                     self.subscribers.retain(|subscriber| {
                         if let Some(subscriber) = subscriber.upgrade() {
                             let mut subscriber = subscriber.lock().unwrap();
@@ -1018,7 +1053,10 @@ impl<'a> Terminal<'a> {
             waker: None,
         }));
         self.subscribers.push(Arc::downgrade(&inner));
-        Ok(TerminalEvents { inner })
+        Ok(TerminalEvents {
+            inner,
+            input_frames: self.input_frames.clone(),
+        })
     }
 }
 
@@ -1034,6 +1072,7 @@ impl Terminal<'static> {
                 subscribers: Vec::new(),
                 received_ctrl_c: false,
                 ignore_ctrl_c: false,
+                input_frames: Arc::new(Mutex::new(InputFrameState::mock())),
             },
             output_stream,
         )
