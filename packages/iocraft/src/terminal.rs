@@ -962,7 +962,8 @@ impl<'a> Terminal<'a> {
             Some(event_stream) => {
                 while let Some(event) = event_stream.next().await {
                     let event = event?;
-                    if matches!(event, TerminalEvent::Resize(..)) {
+                    let resized = matches!(event, TerminalEvent::Resize(..));
+                    if resized {
                         self.inner.invalidate_geometry();
                     }
                     if !self.ignore_ctrl_c {
@@ -990,6 +991,14 @@ impl<'a> Terminal<'a> {
                             false
                         }
                     });
+                    if resized {
+                        // Geometry is a dispatch boundary, not merely another
+                        // queued callback. Reflow and draw through the existing
+                        // render loop before delivering later input; otherwise
+                        // children and parent callbacks still own old focus and
+                        // visibility for the entire ready event batch.
+                        return Ok(());
+                    }
                 }
                 Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
