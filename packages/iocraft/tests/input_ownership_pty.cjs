@@ -7,7 +7,7 @@ const fromHost = name => require(path.join(process.env.IOCRAFT_TERMINAL_MODULES,
 const { Terminal } = fromHost('@xterm/headless');
 const pty = fromHost('node-pty');
 const [fixture, mode, scenario] = process.argv.slice(2);
-assert(fixture && ['bundled', 'system'].includes(mode) && ['clear', 'paste', 'middle-paste', 'clear-paste', 'navigation', 'rendered-cursor', 'resize-boundary', 'resize-restore-boundary', 'resize-narrow-burst', 'resize-pending-burst', 'resize-pending-restore'].includes(scenario));
+assert(fixture && ['bundled', 'system'].includes(mode) && ['clear', 'paste', 'middle-paste', 'clear-paste', 'navigation', 'rendered-cursor', 'resize-boundary', 'resize-restore-boundary', 'resize-narrow-burst', 'resize-pending-burst', 'resize-pending-restore', 'resize-visible-burst', 'resize-pending-visible'].includes(scenario));
 const terminal = new Terminal({ cols: 100, rows: 30, scrollback: 1000, allowProposedApi: true,
   ...(process.platform === 'win32' ? { reflowCursorLine: mode !== 'system',
     windowsPty: { backend: 'conpty', buildNumber: Number(os.release().split('.')[2]) } } : {}) });
@@ -17,7 +17,8 @@ delete env.NO_COLOR;
 const child = pty.spawn(path.resolve(fixture), [], { cols: 100, rows: 30,
   cwd: path.dirname(path.resolve(fixture)), env, useConpty: true, useConptyDll: mode === 'bundled' });
 let pending = 0, lastData = Date.now(), exited = false, exitCode;
-const pausedScenario = scenario === 'resize-pending-burst' || scenario === 'resize-pending-restore';
+const visibleScenario = scenario === 'resize-visible-burst' || scenario === 'resize-pending-visible';
+const pausedScenario = scenario === 'resize-pending-burst' || scenario === 'resize-pending-restore' || scenario === 'resize-pending-visible';
 let paused = false;
 function ownedIdentity() {
   const stat = fs.readFileSync(`/proc/${child.pid}/stat`, 'utf8');
@@ -93,7 +94,7 @@ async function stop() {
 (async () => {
   try {
     await waitFor('InputValue::EndValue');
-    const narrowBurst = scenario === 'resize-narrow-burst' || pausedScenario;
+    const narrowBurst = scenario === 'resize-narrow-burst' || pausedScenario || visibleScenario;
     const seed = narrowBurst ? 'DraftHeadTail' : 'Seed';
     child.write(seed);
     await waitFor(`InputValue:${seed}:EndValue`, !narrowBurst);
@@ -104,6 +105,28 @@ async function stop() {
       await waitFor('InputValue:DraftXHeadTail:EndValue', false);
       child.write('\x7f');
       await waitFor('InputValue:DraftHeadTail:EndValue', false);
+    }
+    if (visibleScenario) {
+      if (pausedScenario) {
+        await waitFor('InputValue:DraftHeadTail:EndValue');
+        await pauseOwned();
+      }
+      terminal.resize(94, 30);
+      child.resize(94, 30);
+      child.write('Kept\x1b[200~Paste\x1b[201~\r\x1b[17~');
+      resumeOwned();
+      await waitFor('Viewport:94x30:reviewable');
+      await waitFor('BatchAck:1');
+      const expected = 'DraftKept[Paste]HeadTail';
+      assert(viewport().includes(`InputValue:${expected}:EndValue`), `visible input was lost\n${screen()}`);
+      assert(viewport().includes('Confirmed:1'), `visible confirmation was lost\n${screen()}`);
+      child.write('Z\x1b[17~');
+      await waitFor('BatchAck:2');
+      assert(viewport().includes('InputValue:DraftKept[Paste]ZHeadTail:EndValue'), 'visible resize preserves cursor and exactly-once delivery');
+      console.log(JSON.stringify({ mode, scenario, expected, result: 'PASS' }));
+      await stop();
+      assert.equal(exitCode, 0, 'fixture exit');
+      return;
     }
     if (scenario === 'resize-boundary' || scenario === 'resize-restore-boundary' || narrowBurst) {
       const narrow = narrowBurst;
