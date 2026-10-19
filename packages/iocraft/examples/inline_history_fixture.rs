@@ -4,6 +4,11 @@ use iocraft::prelude::*;
 #[component]
 fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let (width, height) = hooks.use_terminal_size();
+    let history_gap = if std::env::var_os("IOCRAFT_FIXTURE_HISTORY_GAP").is_some() {
+        "\n"
+    } else {
+        ""
+    };
     let (first, first_error) = hooks.use_output();
     let (second, _) = hooks.use_output();
     let mut phase = hooks.use_state(|| 0_u32);
@@ -36,7 +41,7 @@ fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
                 KeyCode::F(5) => {
                     first.print("StdoutPrefix:");
-                    first_error.println("StderrSuffix");
+                    first_error.println(format!("StderrSuffix{history_gap}"));
                     phase.set(5);
                 }
                 KeyCode::F(6) => acknowledgment.set(acknowledgment.get() + 1),
@@ -50,7 +55,10 @@ fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
                 KeyCode::F(9) => {
                     history_count.set(history_count.get() + 1);
-                    first.println(format!("ResizeHistory {}", history_count.get()));
+                    first.println(format!(
+                        "ResizeHistory {}{history_gap}",
+                        history_count.get()
+                    ));
                 }
                 KeyCode::Esc => done.set(true),
                 _ => {}

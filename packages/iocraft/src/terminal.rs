@@ -181,6 +181,7 @@ trait TerminalImpl: Write + Send {
     fn end_frame(&mut self) -> io::Result<()> {
         Ok(())
     }
+    fn set_history_blank_anchor(&mut self, _available: bool) {}
     fn clear_canvas(&mut self) -> io::Result<()>;
     fn write_canvas(&mut self, prev: Option<&Canvas>, canvas: &Canvas) -> io::Result<()>;
     fn event_stream(&mut self) -> io::Result<BoxStream<'static, io::Result<TerminalEvent>>>;
@@ -217,6 +218,26 @@ fn clear_canvas_inline(
     }
 }
 
+/// Park on a verified blank at the start whenever one is already owned by
+/// history or the canvas. The offset distinguishes those coordinate origins.
+#[derive(Clone, Copy, Default)]
+enum InlineAnchor {
+    #[default]
+    Tail,
+    CanvasBlank,
+    HistoryBlank,
+}
+
+impl InlineAnchor {
+    fn start_offset(self) -> Option<u16> {
+        match self {
+            Self::Tail => None,
+            Self::CanvasBlank => Some(0),
+            Self::HistoryBlank => Some(1),
+        }
+    }
+}
+
 struct StdTerminal<'a> {
     input_is_terminal: bool,
     dest: FrameWriter<'a>,
@@ -230,6 +251,8 @@ struct StdTerminal<'a> {
     prev_canvas_height: u16,
     prev_size_on_write: Option<(u16, u16)>,
     inline_anchored: bool,
+    inline_anchor: InlineAnchor,
+    history_blank_anchor: bool,
     inline_reanchor_row: Option<u16>,
     resize_pending: bool,
     resize_cursor: Option<(u16, u16)>,
@@ -263,6 +286,8 @@ impl TerminalImpl for StdTerminal<'_> {
         self.prev_canvas_height = 0;
         self.prev_size_on_write = None;
         self.inline_anchored = false;
+        self.inline_anchor = InlineAnchor::Tail;
+        self.history_blank_anchor = false;
         self.inline_reanchor_row = None;
         self.resize_cursor = None;
         self.set_raw_mode_enabled(false)?;
@@ -362,7 +387,53 @@ impl TerminalImpl for StdTerminal<'_> {
                 })
             });
             match self.resize_cursor {
+                Some((0, row)) if self.inline_anchor.start_offset().is_some() => {
+                    let offset = self.inline_anchor.start_offset().unwrap();
+                    // Height shrink removes rows below the parked cursor
+                    // before width reflow. Only the retained prefix contributes
+                    // to the cursor/start displacement; erased rows cannot wrap.
+                    let retained =
+                        self.size
+                            .map_or(usize::from(self.prev_canvas_height), |(_, height)| {
+                                if self
+                                    .prev_size_on_write
+                                    .is_some_and(|(_, previous_height)| height < previous_height)
+                                {
+                                    usize::from(height.saturating_sub(row).saturating_sub(offset))
+                                        .min(usize::from(self.prev_canvas_height))
+                                } else {
+                                    usize::from(self.prev_canvas_height)
+                                }
+                            });
+                    let projected = previous.map_or(rows, |canvas| {
+                        self.size.map_or(retained, |(columns, _)| {
+                            canvas.reflowed_prefix_height(usize::from(columns), retained)
+                        })
+                    });
+                    let correction = projected.saturating_sub(retained);
+                    if correction <= usize::from(row) {
+                        let top = row - correction as u16;
+                        self.dest
+                            .queue(cursor::MoveTo(0, top))?
+                            .queue(terminal::Clear(terminal::ClearType::FromCursorDown))?;
+                        if offset > 0 {
+                            // CSI E clamps on the last row; a newline creates
+                            // the row below the verified history blank there.
+                            self.dest.write_all(b"\r\n")?;
+                        }
+                        self.inline_reanchor_row = Some(self.size.map_or(top, |(_, height)| {
+                            top.saturating_add(offset).min(height.saturating_sub(1))
+                        }));
+                    } else {
+                        // The starting row cannot be proved addressable.
+                        // Preserve caller history rather than guessing.
+                        self.retain_unlocated_inline_frame()?;
+                    }
+                }
                 Some((0, row)) => {
+                    // A tail recovery cannot prove the row before a formerly
+                    // oversized canvas still contains our history separator.
+                    self.history_blank_anchor = false;
                     let reachable = rows.min(usize::from(row));
                     if reachable > 0 {
                         self.dest
@@ -380,10 +451,7 @@ impl TerminalImpl for StdTerminal<'_> {
                 _ => {
                     // Unknown cursor geometry must never authorize erasing
                     // lines which might belong to the caller's shell history.
-                    for _ in 0..self.size.map_or(1, |(_, height)| height) {
-                        self.dest.write_all(b"\r\n")?;
-                    }
-                    self.dest.write_all(b"[iocraft] Previous live rows could not be located after resize; history retained.\r\n")?;
+                    self.retain_unlocated_inline_frame()?;
                 }
             }
             self.prev_canvas_height = 0;
@@ -391,18 +459,37 @@ impl TerminalImpl for StdTerminal<'_> {
             self.resize_cursor = None;
             return Ok(true);
         }
-        self.dest.queue(cursor::MoveToPreviousLine(1))?;
+        if let Some(offset) = self.inline_anchor.start_offset() {
+            let distance = self
+                .prev_canvas_height
+                .saturating_sub(1)
+                .saturating_add(offset);
+            if distance > 0 {
+                self.dest.queue(cursor::MoveToNextLine(distance))?;
+            }
+        } else {
+            self.dest.queue(cursor::MoveToPreviousLine(1))?;
+        }
         Ok(false)
     }
 
     fn end_frame(&mut self) -> io::Result<()> {
-        // A blank tail keeps reflow from changing the cursor's logical column.
-        // The previous canvas defines how many physical rows precede it.
+        // Return to the selected blank boundary after each complete frame.
+        // A start anchor keeps a height shrink from scrolling live prose away.
         if !self.fullscreen && self.prev_canvas_height > 0 {
             self.dest.write_all(b"\r\n")?;
+            if let Some(offset) = self.inline_anchor.start_offset() {
+                self.dest.queue(cursor::MoveToPreviousLine(
+                    self.prev_canvas_height.saturating_add(offset),
+                ))?;
+            }
             self.inline_anchored = true;
         }
         Ok(())
+    }
+
+    fn set_history_blank_anchor(&mut self, available: bool) {
+        self.history_blank_anchor = available;
     }
 
     fn clear_canvas(&mut self) -> io::Result<()> {
@@ -433,6 +520,30 @@ impl TerminalImpl for StdTerminal<'_> {
     }
 
     fn write_canvas(&mut self, prev: Option<&Canvas>, canvas: &Canvas) -> io::Result<()> {
+        // Reuse a blank already supplied by history or layout. Inserting a
+        // guard into the canvas would move prose during history handoff.
+        self.inline_anchor = if !self.fullscreen && canvas.height() > 0 {
+            let candidate = if self.history_blank_anchor {
+                InlineAnchor::HistoryBlank
+            } else if (0..canvas.width())
+                .all(|x| canvas.cell(x, 0).is_none_or(|cell| cell.is_empty()))
+            {
+                InlineAnchor::CanvasBlank
+            } else {
+                InlineAnchor::Tail
+            };
+            if candidate.start_offset().is_some_and(|offset| {
+                self.size.is_some_and(|(_, rows)| {
+                    canvas.height() + usize::from(offset) < usize::from(rows)
+                })
+            }) {
+                candidate
+            } else {
+                InlineAnchor::Tail
+            }
+        } else {
+            InlineAnchor::Tail
+        };
         let Some(prev) = prev else {
             // No previous canvas: full write.
             if self.fullscreen {
@@ -622,6 +733,14 @@ impl TerminalImpl for StdTerminal<'_> {
 }
 
 impl<'a> StdTerminal<'a> {
+    fn retain_unlocated_inline_frame(&mut self) -> io::Result<()> {
+        self.history_blank_anchor = false;
+        for _ in 0..self.size.map_or(1, |(_, height)| height) {
+            self.dest.write_all(b"\r\n")?;
+        }
+        self.dest.write_all(b"[iocraft] Previous live rows could not be located after resize; history retained.\r\n")
+    }
+
     fn new(
         dest: Box<dyn Write + Send + 'a>,
         alt: Box<dyn Write + Send + 'a>,
@@ -648,6 +767,8 @@ impl<'a> StdTerminal<'a> {
             size: None,
             prev_size_on_write: None,
             inline_anchored: false,
+            inline_anchor: InlineAnchor::Tail,
+            history_blank_anchor: false,
             inline_reanchor_row: None,
             resize_pending: false,
             resize_cursor: None,
@@ -957,6 +1078,10 @@ impl<'a> Terminal<'a> {
 
     pub fn end_frame(&mut self) -> io::Result<()> {
         self.inner.end_frame()
+    }
+
+    pub(crate) fn needs_presentation(&self, canvas: &Canvas) -> bool {
+        self.presentation.needs_presentation(canvas)
     }
 
     pub fn present(&mut self, canvas: Canvas) -> io::Result<()> {
@@ -1567,6 +1692,8 @@ mod tests {
             size: None,
             prev_size_on_write: None,
             inline_anchored: false,
+            inline_anchor: InlineAnchor::Tail,
+            history_blank_anchor: false,
             inline_reanchor_row: None,
             resize_pending: false,
             resize_cursor: None,
@@ -1596,6 +1723,8 @@ mod tests {
             size: Some(term_size),
             prev_size_on_write: None,
             inline_anchored: false,
+            inline_anchor: InlineAnchor::Tail,
+            history_blank_anchor: false,
             inline_reanchor_row: None,
             resize_pending: false,
             resize_cursor: None,
@@ -2314,6 +2443,49 @@ mod tests {
                 assert_eq!(text.matches(marker).count(), 1, "{cols} columns: {text}");
             }
         }
+    }
+
+    #[test]
+    fn history_blank_anchor_does_not_survive_external_ownership() {
+        let (dest, bytes) = new_test_writer();
+        let mut term = new_inline_term_with_size(dest, 0, (80, 20));
+        let mut vt = avt::Vt::new(80, 20);
+        vt.feed_str("CallerHistory\r\n\r\n");
+        let canvas = element! {
+            Text(content: "StatusMarker\nInputMarker")
+        }
+        .render(Some(80));
+        term.set_history_blank_anchor(true);
+        term.write_canvas(None, &canvas).unwrap();
+        term.end_frame().unwrap();
+        vt.feed_str(&String::from_utf8(std::mem::take(&mut *bytes.lock().unwrap())).unwrap());
+
+        // Align the fake writer with suspend's OS sample before the handoff;
+        // this scenario exercises ownership, not a concurrent OS resize.
+        term.refresh_size();
+        term.prev_size_on_write = term.size;
+        term.suspend().unwrap();
+        term.dest.write_all(b"ExternalOwner").unwrap();
+        term.resume().unwrap();
+        term.size = Some((80, 20));
+        term.write_canvas(None, &canvas).unwrap();
+        term.end_frame().unwrap();
+        vt.feed_str(&String::from_utf8(std::mem::take(&mut *bytes.lock().unwrap())).unwrap());
+
+        vt.resize(80, 10);
+        term.size = Some((80, 10));
+        term.resize_cursor = Some((vt.cursor().col as u16, vt.cursor().row as u16));
+        assert!(term.begin_frame(Some(&canvas)).unwrap());
+        term.write_canvas(None, &canvas).unwrap();
+        term.end_frame().unwrap();
+        vt.feed_str(&String::from_utf8(std::mem::take(&mut *bytes.lock().unwrap())).unwrap());
+        let contents = (0..10)
+            .map(|row| vt.line(row).text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(contents.matches("CallerHistory").count(), 1, "{contents}");
+        assert_eq!(contents.matches("ExternalOwner").count(), 1, "{contents}");
+        assert_eq!(contents.matches("StatusMarker").count(), 1, "{contents}");
     }
 
     #[test]

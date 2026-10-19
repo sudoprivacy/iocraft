@@ -15,7 +15,7 @@ const { Terminal } = fromHost('@xterm/headless');
 const [fixture, mode = 'bundled', resize] = process.argv.slice(2);
 assert(fixture, 'pass an explicitly built fixture executable');
 assert(['bundled', 'system'].includes(mode), `unknown backend: ${mode}`);
-assert(!resize || ['resize', 'rapid', 'interleaved', 'tiny', 'oversized-history'].includes(resize), `unknown scenario: ${resize}`);
+assert(!resize || ['resize', 'rapid', 'interleaved', 'tiny', 'bounded-tiny', 'oversized-history'].includes(resize), `unknown scenario: ${resize}`);
 const wireTrace = [];
 const trace = record => {
   if (process.env.IOCRAFT_WIRE_TRACE) wireTrace.push({ time: Date.now(), ...record });
@@ -168,7 +168,8 @@ function check(label, phase, committed) {
       }
       // A subsequent slow round trip also detects latent corruption left by
       // a rapid round trip whose final dimensions matched its initial ones.
-      for (const [cols, rows] of resize === 'tiny' ? [[30,8], [240,40]] : matrix) {
+      for (const [cols, rows] of resize === 'tiny' ? [[30,8], [240,40]]
+        : resize === 'bounded-tiny' ? [[60,40], [40,12], [120,40], [48,40], [240,40]] : matrix) {
         resizeTo(cols, rows);
         await acknowledge(cols, rows);
         check(`resize ${cols}x${rows}`, 5, committed);

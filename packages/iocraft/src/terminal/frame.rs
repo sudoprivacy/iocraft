@@ -39,6 +39,10 @@ impl PresentationState {
         !self.pending.is_empty()
     }
 
+    pub(super) fn needs_presentation(&self, canvas: &Canvas) -> bool {
+        self.has_pending_history() || self.previous.as_ref() != Some(canvas)
+    }
+
     pub(super) fn invalidate(&mut self) {
         self.previous = None;
         self.appended_newline = None;
@@ -70,7 +74,7 @@ impl PresentationState {
         canvas: Canvas,
     ) -> io::Result<()> {
         self.commit_history(backend, output)?;
-        if self.previous.as_ref() != Some(&canvas) {
+        if self.needs_presentation(&canvas) {
             backend.write_canvas(self.previous.as_ref(), &canvas)?;
         }
         // Do not acknowledge a failed write by advancing the diff baseline.
@@ -99,15 +103,27 @@ impl PresentationState {
         // history on that stream in the same batch as the replacement live
         // frame; only a stream switch or a cursor query requires a barrier.
         let mut last_stream = Some(output);
+        let mut trailing_newlines = 0usize;
         for message in self.pending.drain(..) {
             let (stream, text, append_newline) = message.into_parts();
             if let Some(previous) = last_stream.filter(|previous| *previous != stream) {
                 flush_history_stream(backend, output, previous)?;
             }
+            let content_len = text.trim_end_matches(['\r', '\n']).len();
+            let newlines = text[content_len..]
+                .bytes()
+                .filter(|&byte| byte == b'\n')
+                .count();
+            if content_len == 0 {
+                trailing_newlines = trailing_newlines.saturating_add(newlines);
+            } else {
+                trailing_newlines = newlines;
+            }
             let writer = history_stream(backend, output, stream);
             writer.write_all(text.as_bytes())?;
             if append_newline {
                 writer.write_all(newline.as_bytes())?;
+                trailing_newlines = trailing_newlines.saturating_add(1);
                 unfinished = false;
             } else if !text.is_empty() {
                 unfinished = !text.ends_with('\n');
@@ -122,7 +138,9 @@ impl PresentationState {
             // If the position query is unsupported, finish the line rather
             // than painting the live frame over unfinished history.
             backend.dest().write_all(newline.as_bytes())?;
+            trailing_newlines = trailing_newlines.saturating_add(1);
         }
+        backend.set_history_blank_anchor(trailing_newlines >= 2);
         Ok(())
     }
 }

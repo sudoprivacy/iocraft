@@ -282,8 +282,12 @@ impl Canvas {
     }
 
     pub(crate) fn reflowed_height(&self, columns: usize) -> usize {
+        self.reflowed_prefix_height(columns, self.height())
+    }
+
+    pub(crate) fn reflowed_prefix_height(&self, columns: usize, height: usize) -> usize {
         let columns = columns.max(1);
-        (0..self.height())
+        (0..height.min(self.height()))
             .map(|y| {
                 let row = self.row(y).unwrap_or(&[]);
                 let (mut source, mut column, mut rows) = (0, 0, 1);

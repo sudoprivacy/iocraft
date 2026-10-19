@@ -505,12 +505,20 @@ impl<'a> Tree<'a> {
                 // cursor moves or content laid out for an obsolete viewport.
                 continue;
             }
-            term.synchronized_update(|term| {
-                term.begin_frame()?;
-                term.present(canvas)?;
-                term.end_frame()?;
-                Ok(())
-            })?;
+            // A no-op frame must not unpark and repark the inline cursor.
+            // A concurrent host resize can clamp those moves differently and
+            // leave the next DSR pointing into the caller's saved history.
+            if term.resize_pending()
+                || last_render_size != terminal_size
+                || term.needs_presentation(&canvas)
+            {
+                term.synchronized_update(|term| {
+                    term.begin_frame()?;
+                    term.present(canvas)?;
+                    term.end_frame()?;
+                    Ok(())
+                })?;
+            }
             term.present_input_frame();
             last_render_size = terminal_size;
             if let Some(requested) = self.system_context.mouse_capture() {

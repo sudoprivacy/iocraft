@@ -3,7 +3,7 @@ param(
     [Parameter(Mandatory = $true)][string]$AppPath,
     [Parameter(Mandatory = $true)][string]$FixturePath,
     [Parameter(Mandatory = $true)][string]$LogDirectory,
-    [ValidateSet('transactions', 'resize', 'rapid', 'interleaved', 'tiny', 'oversized-history')][string]$Scenario = 'transactions',
+    [ValidateSet('transactions', 'resize', 'rapid', 'interleaved', 'tiny', 'bounded-tiny', 'oversized-history')][string]$Scenario = 'transactions',
     [ValidateSet('bundled', 'system')][string[]]$Backends = @('bundled', 'system')
 )
 

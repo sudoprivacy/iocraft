@@ -33,6 +33,28 @@ fixture proves that assertions observe the completed new frame. Traces stay in
 memory during the scenario and are written after exit: synchronous writes on a
 Docker bind mount had introduced 100 ms gaps between frontend and backend resize.
 
+### Bounded live prose and height shrink (2026-10-19)
+
+A trailing cursor lets a sudden height shrink move the top of a live paragraph
+into native scrollback. Clearing the remaining viewport and repainting then
+leaves a second copy. Bounded frames now park on an existing blank boundary at
+the start when one is known: either the canvas's first row, or the separator
+just written by history. No guard row is added to the application layout.
+
+The history owner reports the separator, and external terminal ownership or
+unlocated recovery invalidates that proof. Resize projection considers only
+the prefix retained below the parked cursor after a height shrink. At the last
+viewport row, recovery uses a newline to create the row below a history boundary;
+a clamped cursor-down command would overwrite that boundary. Unchanged frames
+leave the parked cursor alone while still acknowledging the input frame.
+
+`IOCRAFT_FIXTURE_HISTORY_GAP=1` supplies an ordinary paragraph separator in the
+existing real-PTY fixture. The new `bounded-tiny` matrix includes 40x12 and
+restoration, with every history line, live marker and draft still asserted once.
+CI runs it alongside slow, rapid and interleaved resize on Unix and bundled
+ConPTY. A frame that exceeds its viewport still has the limitations below; the
+original 30x8 diagnostic is retained unchanged.
+
 ### Remaining limits
 
 - If old live rows have moved above the cursor-addressable viewport, retain
