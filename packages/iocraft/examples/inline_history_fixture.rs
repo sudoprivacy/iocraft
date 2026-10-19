@@ -4,8 +4,15 @@ use iocraft::prelude::*;
 #[component]
 fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let (width, height) = hooks.use_terminal_size();
+    let history_gap = if std::env::var_os("IOCRAFT_FIXTURE_HISTORY_GAP").is_some() {
+        "\n"
+    } else {
+        ""
+    };
     let (first, first_error) = hooks.use_output();
+    let resize_history = first.clone();
     let (second, _) = hooks.use_output();
+    let mut resize_history_written = hooks.use_state(|| false);
     let mut phase = hooks.use_state(|| 0_u32);
     let mut acknowledgment = hooks.use_state(|| 0_u32);
     let mut history_count = hooks.use_state(|| 0_u32);
@@ -36,7 +43,7 @@ fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
                 KeyCode::F(5) => {
                     first.print("StdoutPrefix:");
-                    first_error.println("StderrSuffix");
+                    first_error.println(format!("StderrSuffix{history_gap}"));
                     phase.set(5);
                 }
                 KeyCode::F(6) => acknowledgment.set(acknowledgment.get() + 1),
@@ -50,13 +57,25 @@ fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
                 KeyCode::F(9) => {
                     history_count.set(history_count.get() + 1);
-                    first.println(format!("ResizeHistory {}", history_count.get()));
+                    first.println(format!(
+                        "ResizeHistory {}{history_gap}",
+                        history_count.get()
+                    ));
                 }
                 KeyCode::Esc => done.set(true),
                 _ => {}
             }
         }
     });
+    // Queue durable output in the same component update as height growth.
+    // The flag is supplied only by the dedicated real-terminal regression.
+    if !resize_history_written.get()
+        && std::env::var_os("IOCRAFT_FIXTURE_HISTORY_GATE")
+            .is_some_and(|path| std::path::Path::new(&path).is_file())
+    {
+        resize_history.println("ConcurrentFirst\r\nConcurrentSecond\r\n");
+        resize_history_written.set(true);
+    }
     if done.get() {
         system.exit();
     }
