@@ -46,6 +46,7 @@ fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     element! {
         View(flex_direction: FlexDirection::Column) {
             Text(content: format!("Viewport:{width}x{height}:{}", if reviewable { "reviewable" } else { "blocked" }))
+            Text(content: if reviewable { "Focus:on" } else { "Focus:off" })
             Text(content: format!("InputValue:{}:EndValue", value.read().as_str()))
             Text(content: format!("BatchAck:{}", acknowledgment.get()))
             Text(content: format!("Confirmed:{}", confirmed.get()))

@@ -72,7 +72,7 @@ async function stop() {
       // F6 acknowledges delivery. For the restore case do not wait between
       // hidden input and growth: those pre-resize keys still own the old frame.
       child.write('MustNotAppear\r' + (narrow ? '' : '\x1b[17~'));
-      if (narrow) await waitFor('blocked');
+      if (narrow) await waitFor('Focus:off');
       if (scenario === 'resize-boundary') {
         await waitFor('Viewport:30x8:blocked');
         await waitFor('BatchAck:1');
