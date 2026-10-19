@@ -615,16 +615,20 @@ mod tests {
     use crate::prelude::*;
     use futures::Future;
 
-    #[allow(clippy::unnecessary_mut_passed)]
     #[test]
     fn test_element() {
         let mut view_element = element!(View);
         view_element.key();
         view_element.print();
         view_element.eprint();
-        (&mut view_element).key();
-        (&mut view_element).print();
-        (&mut view_element).eprint();
+        {
+            let mut view_ref = &mut view_element;
+            // UFCS keeps Self = &mut Element, rather than auto-dereferencing
+            // the receiver and accidentally losing reference-impl coverage.
+            ElementExt::key(&view_ref);
+            ElementExt::print(&mut view_ref);
+            ElementExt::eprint(&mut view_ref);
+        }
 
         #[cfg(unix)]
         view_element.write_to_raw_fd(std::io::stdout()).unwrap();
@@ -633,9 +637,12 @@ mod tests {
         any_element.key();
         any_element.print();
         any_element.eprint();
-        (&mut any_element).key();
-        (&mut any_element).print();
-        (&mut any_element).eprint();
+        {
+            let mut any_ref = &mut any_element;
+            ElementExt::key(&any_ref);
+            ElementExt::print(&mut any_ref);
+            ElementExt::eprint(&mut any_ref);
+        }
 
         let mut view_element = element!(View);
         let mut any_element_ref: AnyElement = (&mut view_element).into();
