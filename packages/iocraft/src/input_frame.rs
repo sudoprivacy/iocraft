@@ -103,7 +103,7 @@ mod tests {
 
     #[test]
     fn input_requires_successful_presentation() {
-        let state = Arc::default();
+        let state = Arc::<Mutex<InputFrameState>>::default();
         let frame = InputFrame::begin(state.clone(), LARGE);
         observe(&state, LARGE);
         assert!(!frame.is_current());
@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn shrink_before_resize_notification_rejects_old_frame_input() {
-        let state = Arc::default();
+        let state = Arc::<Mutex<InputFrameState>>::default();
         let frame = InputFrame::begin(state.clone(), LARGE);
         state.lock().unwrap().present();
         observe(&state, SMALL);
@@ -125,7 +125,7 @@ mod tests {
 
     #[test]
     fn growth_does_not_authorize_input_collected_in_the_small_frame() {
-        let state = Arc::default();
+        let state = Arc::<Mutex<InputFrameState>>::default();
         let small = InputFrame::begin(state.clone(), SMALL);
         state.lock().unwrap().present();
         let observation = state.lock().unwrap().sample(LARGE);
@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn same_size_redraw_cannot_launder_an_older_observation() {
-        let state = Arc::default();
+        let state = Arc::<Mutex<InputFrameState>>::default();
         let old = InputFrame::begin(state.clone(), LARGE);
         state.lock().unwrap().present();
         let observation = state.lock().unwrap().sample(LARGE);
@@ -156,7 +156,7 @@ mod tests {
 
     #[test]
     fn unpresented_render_does_not_replace_the_presented_frame() {
-        let state = Arc::default();
+        let state = Arc::<Mutex<InputFrameState>>::default();
         let old = InputFrame::begin(state.clone(), LARGE);
         state.lock().unwrap().present();
         let unpresented = InputFrame::begin(state.clone(), SMALL);
@@ -167,7 +167,7 @@ mod tests {
 
     #[test]
     fn real_terminal_with_unknown_geometry_fails_closed() {
-        let state = Arc::default();
+        let state = Arc::<Mutex<InputFrameState>>::default();
         let frame = InputFrame::begin(state.clone(), None);
         state.lock().unwrap().present();
         observe(&state, None);
