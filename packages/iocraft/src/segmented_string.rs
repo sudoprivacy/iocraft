@@ -150,6 +150,11 @@ impl<'a> SegmentedString<'a> {
 
         let (mut start_segment_idx, mut start_char_idx) = (0, 0);
         for ((segment_idx, char_idx), opportunity_type) in break_opportunities {
+            // Unbounded layout needs only hard line boundaries. Building and
+            // then merging a segment for every word wastes work and buffers.
+            if width == usize::MAX && opportunity_type != BreakOpportunity::Mandatory {
+                continue;
+            }
             let mut new_line_segments = vec![];
 
             while start_segment_idx < segment_idx {
@@ -276,6 +281,20 @@ impl<'a> FromIterator<&'a str> for SegmentedString<'a> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unbounded_lines_preserve_unicode_and_style_boundaries() {
+        for parts in [
+            vec!["ordinary words with spaces and punctuation."],
+            vec!["first\n\n", "second ", "styled", " words\n"],
+            vec!["中文 words ", "e\u{301} 👩🏽‍💻", " and wide 界\r\nnext"],
+            vec!["", "a ", "", "b\u{2028}c\u{2029}d", ""],
+            vec!["  whitespace  \n", "\n", "  last  "],
+        ] {
+            let text: super::SegmentedString<'_> = parts.into_iter().collect();
+            assert_eq!(text.wrap(usize::MAX), text.wrap(1_000_000));
+        }
+    }
+
     use super::*;
 
     #[test]

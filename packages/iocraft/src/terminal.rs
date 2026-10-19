@@ -1104,6 +1104,14 @@ impl<'a> Terminal<'a> {
         self.inner.end_frame()
     }
 
+    pub(crate) fn take_render_buffer(&mut self) -> Option<Canvas> {
+        self.presentation.take_render_buffer()
+    }
+
+    pub(crate) fn recycle_render_buffer(&mut self, canvas: Canvas) {
+        self.presentation.recycle_render_buffer(canvas);
+    }
+
     pub(crate) fn needs_presentation(&self, canvas: &Canvas) -> bool {
         self.presentation.needs_presentation(canvas)
     }

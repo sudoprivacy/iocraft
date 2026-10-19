@@ -383,7 +383,7 @@ impl<'a> Tree<'a> {
         let mut wrapper_child_node_ids = vec![self.root_component.node_id()];
         {
             let mut context = UpdateContext {
-                terminal,
+                terminal: terminal.as_deref_mut(),
                 layout_engine: &mut self.layout_engine,
             };
             let mut component_context_stack = ContextStack::root(&mut self.system_context);
@@ -447,10 +447,15 @@ impl<'a> Tree<'a> {
             .layout_engine
             .layout(self.wrapper_node_id)
             .expect("we should be able to get the wrapper layout");
-        let mut canvas = Canvas::new(
-            wrapper_layout.size.width as _,
-            wrapper_layout.size.height as _,
-        );
+        let width = wrapper_layout.size.width as usize;
+        let height = wrapper_layout.size.height as usize;
+        let mut canvas = match terminal.and_then(Terminal::take_render_buffer) {
+            Some(mut canvas) => {
+                canvas.clear_and_resize(width, height);
+                canvas
+            }
+            None => Canvas::new(width, height),
+        };
         let root_layout = self
             .layout_engine
             .layout(self.root_component.node_id())
@@ -518,6 +523,8 @@ impl<'a> Tree<'a> {
                     term.end_frame()?;
                     Ok(())
                 })?;
+            } else {
+                term.recycle_render_buffer(canvas);
             }
             term.present_input_frame();
             last_render_size = terminal_size;

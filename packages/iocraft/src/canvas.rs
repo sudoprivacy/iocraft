@@ -131,9 +131,24 @@ pub struct Canvas {
 impl Canvas {
     /// Constructs a new canvas with the given dimensions.
     pub fn new(width: usize, height: usize) -> Self {
-        Self {
+        let mut canvas = Self {
             width,
-            cells: vec![vec![CanvasCell::default(); width]; height],
+            cells: Vec::new(),
+        };
+        canvas.clear_and_resize(width, height);
+        canvas
+    }
+
+    pub(crate) fn clear_and_resize(&mut self, width: usize, height: usize) {
+        let is_narrower = width < self.width;
+        self.width = width;
+        self.cells.resize_with(height, Vec::new);
+        for row in &mut self.cells {
+            row.clear();
+            if is_narrower {
+                row.shrink_to(width);
+            }
+            row.resize_with(width, CanvasCell::default);
         }
     }
 
@@ -688,6 +703,34 @@ impl CanvasSubviewMut<'_> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reused_canvas_drops_old_text_background_and_links_on_resize() {
+        let mut canvas = super::Canvas::new(8, 2);
+        {
+            let mut view = canvas.subview_mut(0, 0, 0, 0, 8, 2);
+            view.set_text(0, 0, "old text", super::CanvasTextStyle::default());
+            view.set_background_color(0, 0, 8, 2, crate::Color::Blue);
+            view.set_hyperlink(
+                0,
+                0,
+                8,
+                2,
+                Some(std::sync::Arc::from("https://example.com")),
+            );
+        }
+        for (width, height) in [(4, 1), (8, 2)] {
+            canvas.clear_and_resize(width, height);
+            assert_eq!((canvas.width(), canvas.height()), (width, height));
+            for y in 0..height {
+                for x in 0..width {
+                    let cell = canvas.cell(x, y).unwrap();
+                    assert!(cell.is_empty());
+                    assert!(cell.hyperlink.is_none());
+                }
+            }
+        }
+    }
+
     use super::*;
     use crate::prelude::*;
 
