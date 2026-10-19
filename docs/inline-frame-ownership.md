@@ -55,6 +55,22 @@ CI runs it alongside slow, rapid and interleaved resize on Unix and bundled
 ConPTY. A frame that exceeds its viewport still has the limitations below; the
 original 30x8 diagnostic is retained unchanged.
 
+### Reuse shifted inline rows
+
+For bounded canvases at a stable width, growing prose can retain the existing
+footer, and a clipped rolling paragraph can retain rows already visible. The
+terminal compares complete styled cells and moves a matching region with normal
+insert/delete-line commands, then paints only the changed rows. It extends the
+tail before insertion so a footer at the viewport bottom is preserved.
+
+A private row-diff plan owns the visibility checks, index mapping and byte-cost
+choice. It counts bytes through the existing row encoder, including extra rows
+a move would force it to repaint, and only chooses a move when it saves bytes
+after control-sequence overhead. It adds no source/history cache and leaves the
+component and input APIs unchanged. The real-PTY `row-shift` workflow checks
+history, footer and draft retention, and rejects discarded live rows appearing
+in native scrollback.
+
 ### Remaining limits
 
 - If old live rows have moved above the cursor-addressable viewport, retain

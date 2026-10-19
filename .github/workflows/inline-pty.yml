@@ -110,6 +110,19 @@ jobs:
               -LogDirectory (Join-Path $env:RUNNER_TEMP "inline-pty-logs/history-gap-$scenario") `
               -Scenario $scenario -Backends bundled
           }
+      - name: Reuse growing and rolling prose rows without touching history
+        shell: pwsh
+        env:
+          IOCRAFT_FIXTURE_HISTORY_GAP: '1'
+        run: |
+          $terminal = Join-Path $env:RUNNER_TEMP 'inline-pty-vscode'
+          $app = Join-Path $terminal "$($env:VSCODE_COMMIT.Substring(0, 10))/resources/app"
+          ./packages/iocraft/tests/run_inline_history_pty.ps1 `
+            -CodePath (Join-Path $terminal 'Code.exe') `
+            -AppPath $app `
+            -FixturePath './target/debug/examples/inline_history_fixture.exe' `
+            -LogDirectory (Join-Path $env:RUNNER_TEMP 'inline-pty-logs/row-shift') `
+            -Scenario row-shift
       - name: Retain terminal output and wire traces
         if: always()
         uses: actions/upload-artifact@v4
@@ -171,6 +184,15 @@ jobs:
               target/debug/examples/inline_history_fixture bundled "$scenario" \
               > "$RUNNER_TEMP/inline-pty-logs/history-gap-$scenario.log" 2>&1
           done
+      - name: Reuse growing and rolling prose rows without touching history
+        env:
+          IOCRAFT_FIXTURE_HISTORY_GAP: '1'
+        run: |
+          export IOCRAFT_TERMINAL_MODULES="$GITHUB_WORKSPACE/packages/iocraft/tests/terminal-host/node_modules"
+          IOCRAFT_WIRE_TRACE="$RUNNER_TEMP/inline-pty-logs/row-shift-wire.jsonl" \
+            node packages/iocraft/tests/inline_history_pty.cjs \
+            target/debug/examples/inline_history_fixture bundled row-shift \
+            > "$RUNNER_TEMP/inline-pty-logs/row-shift.log" 2>&1
       - name: Retain terminal output and wire traces
         if: always()
         uses: actions/upload-artifact@v4

@@ -309,7 +309,12 @@ impl Canvas {
     }
 
     pub(crate) fn row_eq(&self, other: &Self, y: usize) -> bool {
-        self.width == other.width && self.row(y) == other.row(y)
+        self.row_eq_at(other, y, y)
+    }
+
+    #[inline]
+    pub(crate) fn row_eq_at(&self, other: &Self, row: usize, other_row: usize) -> bool {
+        self.width == other.width && self.row(row) == other.row(other_row)
     }
 
     /// Writes a single row.

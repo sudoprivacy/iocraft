@@ -15,7 +15,7 @@ const { Terminal } = fromHost('@xterm/headless');
 const [fixture, mode = 'bundled', resize] = process.argv.slice(2);
 assert(fixture, 'pass an explicitly built fixture executable');
 assert(['bundled', 'system'].includes(mode), `unknown backend: ${mode}`);
-assert(!resize || ['resize', 'rapid', 'interleaved', 'tiny', 'bounded-tiny', 'history-growth', 'oversized-history'].includes(resize), `unknown scenario: ${resize}`);
+assert(!resize || ['resize', 'rapid', 'interleaved', 'tiny', 'bounded-tiny', 'history-growth', 'row-shift', 'oversized-history'].includes(resize), `unknown scenario: ${resize}`);
 const wireTrace = [];
 const trace = record => {
   if (process.env.IOCRAFT_WIRE_TRACE) wireTrace.push({ time: Date.now(), ...record });
