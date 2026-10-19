@@ -4,6 +4,7 @@ use crossterm::{
     style::{Attribute, Colored},
 };
 use std::{
+    borrow::Cow,
     env,
     fmt::{self, Display},
     io::{self, Write},
@@ -13,7 +14,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(Clone, Debug, PartialEq)]
 struct Character {
-    value: String,
+    value: Cow<'static, str>,
     style: CanvasTextStyle,
 }
 
@@ -40,7 +41,33 @@ pub(crate) fn handles_vs16_incorrectly() -> bool {
     }
 }
 
+// Borrow the common one-byte cells instead of allocating a string per cell.
+// Non-ASCII graphemes retain owned storage, including combining code points.
+static ASCII_CELLS: [u8; 128] = {
+    let mut bytes = [0; 128];
+    let mut index = 0;
+    while index < bytes.len() {
+        bytes[index] = index as u8;
+        index += 1;
+    }
+    bytes
+};
+
 impl Character {
+    fn new(value: Cow<'_, str>, style: CanvasTextStyle) -> Self {
+        let value = if let [byte] = value.as_bytes() {
+            // A valid single-byte UTF-8 string is always ASCII.
+            let index = usize::from(*byte);
+            Cow::Borrowed(
+                std::str::from_utf8(&ASCII_CELLS[index..index + 1])
+                    .expect("an ASCII cell is valid UTF-8"),
+            )
+        } else {
+            Cow::Owned(value.into_owned())
+        };
+        Self { value, style }
+    }
+
     fn required_padding(&self) -> usize {
         if self.value.contains('\u{fe0f}') {
             if handles_vs16_incorrectly() {
@@ -101,7 +128,7 @@ pub struct CanvasCell {
 impl CanvasCell {
     /// Returns the text content of this cell, or `None` if empty.
     pub fn text(&self) -> Option<&str> {
-        self.character.as_ref().map(|ch| ch.value.as_str())
+        self.character.as_ref().map(|ch| ch.value.as_ref())
     }
 
     /// Returns the text style of this cell, or `None` if the cell is empty.
@@ -255,17 +282,14 @@ impl Canvas {
             }
             let width = c.width().unwrap_or(0);
             if width > 0 && !buf.is_empty() {
-                row[x].character = Some(Character {
-                    value: buf.clone(),
-                    style,
-                });
+                row[x].character = Some(Character::new(Cow::Borrowed(&buf), style));
                 x += buf.width().max(1);
                 buf.clear();
             }
             buf.push(c);
         }
         if !buf.is_empty() && x < row.len() {
-            row[x].character = Some(Character { value: buf, style });
+            row[x].character = Some(Character::new(Cow::Owned(buf), style));
         }
     }
 
