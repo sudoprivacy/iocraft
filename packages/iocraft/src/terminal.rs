@@ -126,6 +126,14 @@ impl Stream for TerminalEvents {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         let mut inner = self.inner.lock().unwrap();
+        if inner
+            .pending
+            .front()
+            .is_some_and(|event| self.input_frames.lock().unwrap().pending(event.observation))
+        {
+            inner.waker = Some(cx.waker().clone());
+            return Poll::Pending;
+        }
         if let Some(event) = inner.pending.pop_front() {
             drop(inner);
             self.input_frames.lock().unwrap().observe(event.observation);
@@ -909,6 +917,21 @@ impl<'a> Terminal<'a> {
 
     pub fn present_input_frame(&mut self) {
         self.input_frames.lock().unwrap().present();
+        // Geometry-crossing input waited behind the presentation boundary.
+        // Release the state mutex before acquiring any subscriber mutex.
+        for subscriber in self.subscribers.iter().filter_map(Weak::upgrade) {
+            let waker = {
+                let mut subscriber = subscriber.lock().unwrap();
+                if subscriber.pending.is_empty() {
+                    None
+                } else {
+                    subscriber.waker.take()
+                }
+            };
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        }
     }
 
     pub fn resize_pending(&self) -> bool {

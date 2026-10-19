@@ -25,6 +25,7 @@ fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let (width, height) = hooks.use_terminal_size();
     let input_frame = hooks.use_input_frame();
     let reviewable = width >= 40 && height >= 12;
+    input_frame.set_enabled(reviewable);
     let mut value = hooks.use_state(String::new);
     let mut exit = hooks.use_state(|| false);
     let mut acknowledgment = hooks.use_state(|| 0_u32);

@@ -1,4 +1,5 @@
-use crate::{Hooks, InputFrame};
+use crate::{hooks::UseMemo, input_frame::InputContinuity, Hooks, InputFrame};
+use std::sync::{Arc, Mutex};
 
 mod private {
     pub trait Sealed {}
@@ -8,14 +9,20 @@ mod private {
 /// Access to the current component's presented input frame.
 pub trait UseInputFrame: private::Sealed {
     /// Returns a frame guard for use inside keyboard/paste event callbacks.
+    /// Call in stable hook order on every render. Custom input owners should
+    /// call `set_enabled` with their focus/reviewability before presentation;
+    /// TextInput does that automatically. Cancellation can bypass the guard.
     fn use_input_frame(&mut self) -> InputFrame;
 }
 
 impl UseInputFrame for Hooks<'_, '_> {
     fn use_input_frame(&mut self) -> InputFrame {
-        self.context_stack
+        let frame = self
+            .context_stack
             .and_then(|stack| stack.get_context::<InputFrame>())
             .map(|frame| frame.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let continuity = self.use_memo(Arc::<Mutex<InputContinuity>>::default, ());
+        frame.for_control(continuity)
     }
 }
