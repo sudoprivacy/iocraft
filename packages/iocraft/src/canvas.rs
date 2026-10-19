@@ -14,7 +14,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 #[derive(Clone, Debug, PartialEq)]
 struct Character {
     value: Arc<str>,
-    style: CanvasTextStyle,
+    style: Arc<CanvasTextStyle>,
 }
 
 static mut HANDLES_VS16_INCORRECTLY: bool = false;
@@ -45,7 +45,7 @@ pub(crate) fn handles_vs16_incorrectly() -> bool {
 static ASCII_CELLS: OnceLock<[Arc<str>; 128]> = OnceLock::new();
 
 impl Character {
-    fn new(value: &str, style: CanvasTextStyle) -> Self {
+    fn new(value: &str, style: Arc<CanvasTextStyle>) -> Self {
         let value = if let [byte] = value.as_bytes() {
             // A valid single-byte UTF-8 string is always ASCII.
             let cells = ASCII_CELLS.get_or_init(|| {
@@ -126,7 +126,7 @@ impl CanvasCell {
 
     /// Returns the text style of this cell, or `None` if the cell is empty.
     pub fn text_style(&self) -> Option<&CanvasTextStyle> {
-        self.character.as_ref().map(|ch| &ch.style)
+        self.character.as_ref().map(|ch| ch.style.as_ref())
     }
 
     /// Returns `true` if the cell has no content and no background color.
@@ -268,6 +268,7 @@ impl Canvas {
     {
         // Divide the string up into characters, which may consist of multiple Unicode code points.
         let row = &mut self.cells[y];
+        let style = Arc::new(style);
         let mut buf = String::new();
         for c in chars.into_iter() {
             if x >= row.len() {
@@ -275,7 +276,7 @@ impl Canvas {
             }
             let width = c.width().unwrap_or(0);
             if width > 0 && !buf.is_empty() {
-                row[x].character = Some(Character::new(&buf, style));
+                row[x].character = Some(Character::new(&buf, Arc::clone(&style)));
                 x += buf.width().max(1);
                 buf.clear();
             }
@@ -431,7 +432,7 @@ impl Canvas {
                         write!(w, csi!("{}m"), Attribute::Reverse.sgr())?;
                     }
 
-                    text_style = c.style;
+                    text_style = *c.style;
                 }
             }
 
