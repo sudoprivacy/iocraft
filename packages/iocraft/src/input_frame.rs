@@ -7,14 +7,14 @@ pub(crate) struct InputFrameState {
     rendering_size: Option<(u16, u16)>,
     presented_size: Option<(u16, u16)>,
     observed_size: Option<(u16, u16)>,
-    observed_eligible: bool,
+    observed_revision: Option<u64>,
     allow_unknown_size: bool,
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct InputObservation {
     size: Option<(u16, u16)>,
-    eligible: bool,
+    revision: Option<u64>,
 }
 
 impl InputFrameState {
@@ -33,15 +33,15 @@ impl InputFrameState {
     pub fn sample(&self, size: Option<(u16, u16)>) -> InputObservation {
         InputObservation {
             size,
-            eligible: self.presented.is_some()
-                && self.presented_size == size
-                && (size.is_some() || self.allow_unknown_size),
+            revision: (self.presented_size == size && (size.is_some() || self.allow_unknown_size))
+                .then_some(self.presented)
+                .flatten(),
         }
     }
 
     pub fn observe(&mut self, observation: InputObservation) {
         self.observed_size = observation.size;
-        self.observed_eligible = observation.eligible;
+        self.observed_revision = observation.revision;
     }
 }
 
@@ -81,9 +81,106 @@ impl InputFrame {
     pub fn is_current(&self) -> bool {
         self.state.as_ref().is_none_or(|state| {
             let state = state.lock().unwrap();
-            state.observed_eligible
+            state.observed_revision == Some(self.revision)
                 && state.presented == Some(self.revision)
                 && state.observed_size == self.size
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LARGE: Option<(u16, u16)> = Some((100, 30));
+    const SMALL: Option<(u16, u16)> = Some((12, 8));
+
+    fn observe(state: &Arc<Mutex<InputFrameState>>, size: Option<(u16, u16)>) {
+        let mut state = state.lock().unwrap();
+        let observation = state.sample(size);
+        state.observe(observation);
+    }
+
+    #[test]
+    fn input_requires_successful_presentation() {
+        let state = Arc::default();
+        let frame = InputFrame::begin(state.clone(), LARGE);
+        observe(&state, LARGE);
+        assert!(!frame.is_current());
+        state.lock().unwrap().present();
+        // Presentation cannot authorize an observation collected before it.
+        assert!(!frame.is_current());
+        observe(&state, LARGE);
+        assert!(frame.is_current());
+    }
+
+    #[test]
+    fn shrink_before_resize_notification_rejects_old_frame_input() {
+        let state = Arc::default();
+        let frame = InputFrame::begin(state.clone(), LARGE);
+        state.lock().unwrap().present();
+        observe(&state, SMALL);
+        assert!(!frame.is_current());
+    }
+
+    #[test]
+    fn growth_does_not_authorize_input_collected_in_the_small_frame() {
+        let state = Arc::default();
+        let small = InputFrame::begin(state.clone(), SMALL);
+        state.lock().unwrap().present();
+        let observation = state.lock().unwrap().sample(LARGE);
+        let large = InputFrame::begin(state.clone(), LARGE);
+        state.lock().unwrap().present();
+        state.lock().unwrap().observe(observation);
+        assert!(!small.is_current());
+        assert!(!large.is_current());
+        observe(&state, LARGE);
+        assert!(large.is_current());
+    }
+
+    #[test]
+    fn same_size_redraw_cannot_launder_an_older_observation() {
+        let state = Arc::default();
+        let old = InputFrame::begin(state.clone(), LARGE);
+        state.lock().unwrap().present();
+        let observation = state.lock().unwrap().sample(LARGE);
+        let new = InputFrame::begin(state.clone(), LARGE);
+        state.lock().unwrap().present();
+        state.lock().unwrap().observe(observation);
+        assert!(!old.is_current());
+        assert!(!new.is_current());
+        observe(&state, LARGE);
+        assert!(!old.is_current());
+        assert!(new.is_current());
+    }
+
+    #[test]
+    fn unpresented_render_does_not_replace_the_presented_frame() {
+        let state = Arc::default();
+        let old = InputFrame::begin(state.clone(), LARGE);
+        state.lock().unwrap().present();
+        let unpresented = InputFrame::begin(state.clone(), SMALL);
+        observe(&state, LARGE);
+        assert!(old.is_current());
+        assert!(!unpresented.is_current());
+    }
+
+    #[test]
+    fn real_terminal_with_unknown_geometry_fails_closed() {
+        let state = Arc::default();
+        let frame = InputFrame::begin(state.clone(), None);
+        state.lock().unwrap().present();
+        observe(&state, None);
+        assert!(!frame.is_current());
+    }
+
+    #[test]
+    fn dimensionless_mock_and_static_rendering_remain_compatible() {
+        let state = Arc::new(Mutex::new(InputFrameState::mock()));
+        let frame = InputFrame::begin(state.clone(), None);
+        state.lock().unwrap().present();
+        observe(&state, None);
+        assert!(frame.is_current());
+        assert!(InputFrame::default().is_current());
     }
 }
