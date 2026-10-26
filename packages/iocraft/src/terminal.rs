@@ -256,6 +256,7 @@ struct StdTerminal<'a> {
     prev_size_on_write: Option<(u16, u16)>,
     inline_anchored: bool,
     inline_anchor: InlineAnchor,
+    inline_saved_start: Option<u16>,
     history_blank_anchor: bool,
     inline_reanchor_row: Option<u16>,
     resize_pending: bool,
@@ -277,6 +278,7 @@ impl TerminalImpl for StdTerminal<'_> {
     fn suspend(&mut self) -> io::Result<()> {
         self.refresh_size();
         self.begin_frame(None)?;
+        self.move_to_inline_tail()?;
         if self.fullscreen {
             self.dest.queue(terminal::LeaveAlternateScreen)?;
         } else if self.prev_canvas_height > 0 {
@@ -464,13 +466,10 @@ impl TerminalImpl for StdTerminal<'_> {
             return Ok(true);
         }
         if let Some(offset) = self.inline_anchor.start_offset() {
-            let distance = self
-                .prev_canvas_height
-                .saturating_sub(1)
-                .saturating_add(offset);
-            if distance > 0 {
-                self.dest.queue(cursor::MoveToNextLine(distance))?;
-            }
+            // Save only for this frame. A frontend resize can overtake bytes
+            // already in flight, so tail-relative backward moves are unsafe.
+            self.dest.queue(cursor::SavePosition)?;
+            self.inline_saved_start = Some(offset);
         } else {
             self.dest.queue(cursor::MoveToPreviousLine(1))?;
         }
@@ -478,6 +477,11 @@ impl TerminalImpl for StdTerminal<'_> {
     }
 
     fn end_frame(&mut self) -> io::Result<()> {
+        if self.inline_saved_start.take().is_some() {
+            self.dest.queue(cursor::RestorePosition)?;
+            self.inline_anchored = true;
+            return Ok(());
+        }
         // Return to the selected blank boundary after each complete frame.
         // A start anchor keeps a height shrink from scrolling live prose away.
         if !self.fullscreen && self.prev_canvas_height > 0 {
@@ -501,6 +505,7 @@ impl TerminalImpl for StdTerminal<'_> {
     }
 
     fn clear_canvas(&mut self) -> io::Result<()> {
+        self.move_to_inline_tail()?;
         if self.prev_canvas_height == 0 {
             return Ok(());
         }
@@ -553,6 +558,7 @@ impl TerminalImpl for StdTerminal<'_> {
             InlineAnchor::Tail
         };
         let Some(prev) = prev else {
+            self.move_to_inline_tail()?;
             // No previous canvas: full write.
             if self.fullscreen {
                 self.prev_canvas_top_row = 0;
@@ -612,6 +618,14 @@ impl TerminalImpl for StdTerminal<'_> {
         let shift = self
             .size
             .and_then(|size| row_diff::RowShift::between(prev, canvas, size));
+        let from_start = self.inline_saved_start.filter(|offset| {
+            prev_height == new_height
+                && shift.is_none()
+                && self.inline_anchor.start_offset() == Some(*offset)
+        });
+        if from_start.is_none() {
+            self.move_to_inline_tail()?;
+        }
         let mut current_y = match &shift {
             Some(shift) => shift.apply(&mut self.dest, prev_height)?,
             None => prev_height.saturating_sub(1),
@@ -635,35 +649,43 @@ impl TerminalImpl for StdTerminal<'_> {
                     return Ok(());
                 }
             }
-            match y.cmp(&current_y) {
-                std::cmp::Ordering::Less => {
-                    self.dest
-                        .queue(cursor::MoveToPreviousLine((current_y - y) as u16))?;
+            if let Some(offset) = from_start {
+                self.dest.queue(cursor::RestorePosition)?;
+                let distance = y + usize::from(offset);
+                if distance > 0 {
+                    self.dest.queue(cursor::MoveToNextLine(distance as u16))?;
                 }
-                std::cmp::Ordering::Greater => {
-                    // Lines within the previous canvas already exist in the
-                    // terminal and can be reached with MoveToNextLine (CSI E).
-                    // Lines beyond prev_height don't exist yet — we must emit
-                    // \r\n to create them, since CSI E won't extend the
-                    // scrollback when the cursor is at the bottom of the screen.
-                    let last_existing_line = prev_height.saturating_sub(1).max(current_y);
-                    if y <= last_existing_line {
+            } else {
+                match y.cmp(&current_y) {
+                    std::cmp::Ordering::Less => {
                         self.dest
-                            .queue(cursor::MoveToNextLine((y - current_y) as u16))?;
-                    } else {
-                        let move_to_last = last_existing_line.saturating_sub(current_y);
-                        if move_to_last > 0 {
+                            .queue(cursor::MoveToPreviousLine((current_y - y) as u16))?;
+                    }
+                    std::cmp::Ordering::Greater => {
+                        // Lines within the previous canvas already exist in the
+                        // terminal and can be reached with MoveToNextLine (CSI E).
+                        // Lines beyond prev_height don't exist yet — we must emit
+                        // \r\n to create them, since CSI E won't extend the
+                        // scrollback when the cursor is at the bottom of the screen.
+                        let last_existing_line = prev_height.saturating_sub(1).max(current_y);
+                        if y <= last_existing_line {
                             self.dest
-                                .queue(cursor::MoveToNextLine(move_to_last as u16))?;
-                        }
-                        let new_lines = y - last_existing_line;
-                        for _ in 0..new_lines {
-                            self.dest.write_all(b"\r\n")?;
+                                .queue(cursor::MoveToNextLine((y - current_y) as u16))?;
+                        } else {
+                            let move_to_last = last_existing_line.saturating_sub(current_y);
+                            if move_to_last > 0 {
+                                self.dest
+                                    .queue(cursor::MoveToNextLine(move_to_last as u16))?;
+                            }
+                            let new_lines = y - last_existing_line;
+                            for _ in 0..new_lines {
+                                self.dest.write_all(b"\r\n")?;
+                            }
                         }
                     }
-                }
-                std::cmp::Ordering::Equal => {
-                    self.dest.queue(cursor::MoveToColumn(0))?;
+                    std::cmp::Ordering::Equal => {
+                        self.dest.queue(cursor::MoveToColumn(0))?;
+                    }
                 }
             }
             current_y = y;
@@ -678,16 +700,18 @@ impl TerminalImpl for StdTerminal<'_> {
 
         // Reposition cursor to last row of new canvas.
         let target_y = new_height.saturating_sub(1);
-        match target_y.cmp(&current_y) {
-            std::cmp::Ordering::Greater => {
-                self.dest
-                    .queue(cursor::MoveToNextLine((target_y - current_y) as u16))?;
+        if from_start.is_none() {
+            match target_y.cmp(&current_y) {
+                std::cmp::Ordering::Greater => {
+                    self.dest
+                        .queue(cursor::MoveToNextLine((target_y - current_y) as u16))?;
+                }
+                std::cmp::Ordering::Less => {
+                    self.dest
+                        .queue(cursor::MoveToPreviousLine((current_y - target_y) as u16))?;
+                }
+                std::cmp::Ordering::Equal => {}
             }
-            std::cmp::Ordering::Less => {
-                self.dest
-                    .queue(cursor::MoveToPreviousLine((current_y - target_y) as u16))?;
-            }
-            std::cmp::Ordering::Equal => {}
         }
 
         self.prev_canvas_height = new_height as _;
@@ -739,6 +763,23 @@ impl TerminalImpl for StdTerminal<'_> {
 }
 
 impl<'a> StdTerminal<'a> {
+    fn move_to_inline_tail(&mut self) -> io::Result<()> {
+        if let Some(offset) = self.inline_saved_start.take() {
+            self.dest.queue(cursor::RestorePosition)?;
+            let distance = self
+                .prev_canvas_height
+                .saturating_sub(1)
+                .saturating_add(offset);
+            // Unlike CSI E, newlines traverse the full distance even if a
+            // queued resize shortened the viewport. Backward tail operations
+            // must never reach caller history because a descent was clamped.
+            for _ in 0..distance {
+                self.dest.write_all(b"\r\n")?;
+            }
+        }
+        Ok(())
+    }
+
     fn reanchor_inline(&mut self, height: usize, can_relocate: bool) -> io::Result<()> {
         if let Some(top) = self.inline_reanchor_row.take() {
             // Place the complete history/live transaction before history
@@ -792,6 +833,7 @@ impl<'a> StdTerminal<'a> {
             prev_size_on_write: None,
             inline_anchored: false,
             inline_anchor: InlineAnchor::Tail,
+            inline_saved_start: None,
             history_blank_anchor: false,
             inline_reanchor_row: None,
             resize_pending: false,
@@ -1725,6 +1767,7 @@ mod tests {
             prev_size_on_write: None,
             inline_anchored: false,
             inline_anchor: InlineAnchor::Tail,
+            inline_saved_start: None,
             history_blank_anchor: false,
             inline_reanchor_row: None,
             resize_pending: false,
@@ -1756,6 +1799,7 @@ mod tests {
             prev_size_on_write: None,
             inline_anchored: false,
             inline_anchor: InlineAnchor::Tail,
+            inline_saved_start: None,
             history_blank_anchor: false,
             inline_reanchor_row: None,
             resize_pending: false,
@@ -2428,6 +2472,54 @@ mod tests {
         assert_eq!(vt.line(2).text(), "row2      ");
         assert_eq!(vt.line(3).text(), "row3      ");
         assert_eq!(vt.line(4).text(), "FOOTER    ");
+    }
+
+    #[test]
+    fn queued_inline_diff_cannot_overwrite_history_after_frontend_shrink() {
+        let (dest, bytes) = new_test_writer();
+        let mut term = new_inline_term_with_size(dest, 0, (60, 40));
+        term.set_history_blank_anchor(true);
+        let mut vt = avt::Vt::new(60, 40);
+        for index in 0..70 {
+            vt.feed_str(&format!("Earlier history line {index}\r\n"));
+        }
+        vt.feed_str("\r\n");
+        let canvas = |status: &str| {
+            let mut canvas = Canvas::new(60, 13);
+            for (row, text) in [(0, "Live prose"), (6, status), (12, "DraftKept")] {
+                canvas.subview_mut(0, 0, 0, 0, 60, 13).set_text(
+                    0,
+                    row,
+                    text,
+                    CanvasTextStyle::default(),
+                );
+            }
+            canvas
+        };
+        let previous = canvas("Old spinner");
+        term.write_canvas(None, &previous).unwrap();
+        term.end_frame().unwrap();
+        vt.feed_str(&String::from_utf8(std::mem::take(&mut *bytes.lock().unwrap())).unwrap());
+
+        // Encode with the last preflight's dimensions, then resize the frontend
+        // before it receives those bytes. No application-side recheck can
+        // invalidate output which is already in flight.
+        assert!(!term.begin_frame(Some(&previous)).unwrap());
+        term.write_canvas(Some(&previous), &canvas("New spinner"))
+            .unwrap();
+        term.end_frame().unwrap();
+        let frame = String::from_utf8(std::mem::take(&mut *bytes.lock().unwrap())).unwrap();
+        vt.resize(40, 12);
+        vt.feed_str(&frame);
+        let lines = vt.text();
+        for index in 0..70 {
+            let expected = format!("Earlier history line {index}");
+            assert_eq!(
+                lines.iter().filter(|line| **line == expected).count(),
+                1,
+                "queued diff lost or duplicated {expected}: {lines:?}"
+            );
+        }
     }
 
     #[test]
