@@ -60,19 +60,20 @@ original 30x8 diagnostic is retained unchanged.
 A frontend resize can overtake an already emitted frame, after the final OS
 size preflight. Descending from a start anchor with CSI E then clamps at the
 new viewport bottom; the subsequent backward diff can overwrite caller history.
-The descent now uses newlines, so it traverses the complete old-frame distance
-even when that requires scrolling. Stable-size frames retain incremental row
-diffing and reuse their existing rows.
+Unshifted frames of the same height now save the parked start for that frame,
+position changed rows forward from it and restore it at the end. They neither
+rewind from a potentially clamped tail nor scroll unchanged live prose away.
+The saved cursor is never reused across frames as a logical resize anchor.
 
-If the next cursor sample cannot substantiate the projected start, recovery
-clears only from the parked cursor downward. Rows above that owned boundary
-remain untouched. Unknown columns or missing cursor samples still use the
-existing conservative recovery. This does not make inaccessible live rows
-erasable or repair host-specific scrollback loss.
+History handoff, height changes and row shifts retain their tail-based path.
+Their descent uses newlines to preserve its full distance if a queued resize
+shortened the viewport. Existing conservative recovery and inaccessible-live-row
+limitations remain; no caller scrollback is erased to remove live fragments.
 
 The real-PTY `queued-frame` scenario forces a resize after receiving an old-size
 frame and before parsing it, then checks shrink and restoration. It retains
-all 70 history lines, committed output, live markers and draft exactly once.
+all 70 history lines, committed output, live prose, markers and Unicode draft
+exactly once.
 Both Unix CI hosts and bundled ConPTY run it with the history-gap matrix.
 
 ### Reuse shifted inline rows

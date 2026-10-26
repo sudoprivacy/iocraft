@@ -143,17 +143,21 @@ function check(label, phase, committed) {
     const committed = ['SharedPartialJoined', 'SameBatch:end', 'StdoutPrefix:StderrSuffix'];
     check('cross-stream order', 5, committed);
     if (resize === 'queued-frame') {
+      child.write('\x1bOP'); // F1 opens bounded live prose before the race.
+      await settle('FooterMarker p1 a0 240x40', 240);
       terminal.resize(60, 40); child.resize(60, 40);
-      await settle('FooterMarker p5 a0 60x40', 60);
-      check('before queued frame', 5, committed);
+      await settle('FooterMarker p1 a0 60x40', 60);
+      check('before queued frame', 1, committed);
       queuedFrameResize = [40, 12];
-      child.write('\x1bOP'); // F1 changes the first and last live rows.
+      child.write('界'); // Only the input changes; earlier prose must stay owned.
       await settle('FooterMarker p1 a0 40x12', 40);
       assert.equal(queuedFrameResize, undefined, 'the old-size frame was not intercepted');
       check('queued frame during shrink', 1, committed);
       terminal.resize(240, 40); child.resize(240, 40);
       await settle('FooterMarker p1 a0 240x40', 240);
       check('growth after queued frame', 1, committed);
+      for (const marker of ['ProseAlpha', 'ProseBeta', 'DraftSurvives界'])
+        assert.equal(snapshot().split(marker).length - 1, 1, snapshot());
     } else if (resize === 'history-growth') {
       const before = frames, started = Date.now();
       let firstGrowthFrame;
