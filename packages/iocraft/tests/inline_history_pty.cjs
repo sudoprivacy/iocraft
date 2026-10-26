@@ -15,7 +15,7 @@ const { Terminal } = fromHost('@xterm/headless');
 const [fixture, mode = 'bundled', resize] = process.argv.slice(2);
 assert(fixture, 'pass an explicitly built fixture executable');
 assert(['bundled', 'system'].includes(mode), `unknown backend: ${mode}`);
-assert(!resize || ['resize', 'rapid', 'interleaved', 'tiny', 'bounded-tiny', 'history-growth', 'row-shift', 'oversized-history'].includes(resize), `unknown scenario: ${resize}`);
+assert(!resize || ['resize', 'rapid', 'interleaved', 'tiny', 'bounded-tiny', 'queued-frame', 'history-growth', 'row-shift', 'oversized-history'].includes(resize), `unknown scenario: ${resize}`);
 const wireTrace = [];
 const trace = record => {
   if (process.env.IOCRAFT_WIRE_TRACE) wireTrace.push({ time: Date.now(), ...record });
@@ -51,6 +51,7 @@ terminal.parser.registerCsiHandler({ prefix: '?', final: 'l' }, params => {
   return false;
 });
 let lastResize;
+let queuedFrameResize;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 function snapshot() {
   const buffer = terminal.buffer.active;
@@ -72,6 +73,16 @@ function geometry(stage) {
   return result;
 }
 child.onData(data => {
+  if (queuedFrameResize && data.includes('\x1b[?2026h')) {
+    const [cols, rows] = queuedFrameResize;
+    queuedFrameResize = undefined;
+    // The child has already emitted its frame using the old dimensions.
+    // Resize before the frontend parses it, closing the race left by even
+    // the last OS-size preflight without relying on scheduler timing.
+    trace({ resize: [cols, rows], queuedFrame: true });
+    terminal.resize(cols, rows);
+    child.resize(cols, rows);
+  }
   trace({ data });
   lastData = Date.now(); pending++;
   terminal.write(data, () => pending--);
@@ -131,7 +142,19 @@ function check(label, phase, committed) {
     await settle(`FooterMarker p5 a0 240x${initialRows}`);
     const committed = ['SharedPartialJoined', 'SameBatch:end', 'StdoutPrefix:StderrSuffix'];
     check('cross-stream order', 5, committed);
-    if (resize === 'history-growth') {
+    if (resize === 'queued-frame') {
+      terminal.resize(60, 40); child.resize(60, 40);
+      await settle('FooterMarker p5 a0 60x40', 60);
+      check('before queued frame', 5, committed);
+      queuedFrameResize = [40, 12];
+      child.write('\x1bOP'); // F1 changes the first and last live rows.
+      await settle('FooterMarker p1 a0 40x12', 40);
+      assert.equal(queuedFrameResize, undefined, 'the old-size frame was not intercepted');
+      check('queued frame during shrink', 1, committed);
+      terminal.resize(240, 40); child.resize(240, 40);
+      await settle('FooterMarker p1 a0 240x40', 240);
+      check('growth after queued frame', 1, committed);
+    } else if (resize === 'history-growth') {
       const before = frames, started = Date.now();
       let firstGrowthFrame;
       const observe = () => {

@@ -429,9 +429,16 @@ impl TerminalImpl for StdTerminal<'_> {
                             top.saturating_add(offset).min(height.saturating_sub(1))
                         }));
                     } else {
-                        // The starting row cannot be proved addressable.
-                        // Preserve caller history rather than guessing.
-                        self.retain_unlocated_inline_frame()?;
+                        // A queued old-size diff can already have traversed
+                        // the new viewport. Reflowing its old Canvas again
+                        // would put the projected start above row zero. The
+                        // parked cursor is still owned, but rows above it are
+                        // unproven: reclaim only this reachable suffix.
+                        self.history_blank_anchor = false;
+                        self.dest
+                            .queue(cursor::MoveTo(0, row))?
+                            .queue(terminal::Clear(terminal::ClearType::FromCursorDown))?;
+                        self.inline_reanchor_row = Some(row);
                     }
                 }
                 Some((0, row)) => {
@@ -468,8 +475,12 @@ impl TerminalImpl for StdTerminal<'_> {
                 .prev_canvas_height
                 .saturating_sub(1)
                 .saturating_add(offset);
-            if distance > 0 {
-                self.dest.queue(cursor::MoveToNextLine(distance))?;
+            // The frontend can shrink after the last size preflight, while
+            // this frame is already in flight. CSI E would clamp at the new
+            // bottom, so the following diff's backward moves could overwrite
+            // caller history. Newlines preserve the full downward distance.
+            for _ in 0..distance {
+                self.dest.write_all(b"\r\n")?;
             }
         } else {
             self.dest.queue(cursor::MoveToPreviousLine(1))?;
@@ -2428,6 +2439,54 @@ mod tests {
         assert_eq!(vt.line(2).text(), "row2      ");
         assert_eq!(vt.line(3).text(), "row3      ");
         assert_eq!(vt.line(4).text(), "FOOTER    ");
+    }
+
+    #[test]
+    fn queued_inline_diff_cannot_overwrite_history_after_frontend_shrink() {
+        let (dest, bytes) = new_test_writer();
+        let mut term = new_inline_term_with_size(dest, 0, (60, 40));
+        term.set_history_blank_anchor(true);
+        let mut vt = avt::Vt::new(60, 40);
+        for index in 0..70 {
+            vt.feed_str(&format!("Earlier history line {index}\r\n"));
+        }
+        vt.feed_str("\r\n");
+        let canvas = |status: &str| {
+            let mut canvas = Canvas::new(60, 13);
+            for (row, text) in [(0, "Live prose"), (6, status), (12, "DraftKept")] {
+                canvas.subview_mut(0, 0, 0, 0, 60, 13).set_text(
+                    0,
+                    row,
+                    text,
+                    CanvasTextStyle::default(),
+                );
+            }
+            canvas
+        };
+        let previous = canvas("Old spinner");
+        term.write_canvas(None, &previous).unwrap();
+        term.end_frame().unwrap();
+        vt.feed_str(&String::from_utf8(std::mem::take(&mut *bytes.lock().unwrap())).unwrap());
+
+        // Encode with the last preflight's dimensions, then resize the frontend
+        // before it receives those bytes. No application-side recheck can
+        // invalidate output which is already in flight.
+        assert!(!term.begin_frame(Some(&previous)).unwrap());
+        term.write_canvas(Some(&previous), &canvas("New spinner"))
+            .unwrap();
+        term.end_frame().unwrap();
+        let frame = String::from_utf8(std::mem::take(&mut *bytes.lock().unwrap())).unwrap();
+        vt.resize(40, 12);
+        vt.feed_str(&frame);
+        let lines = vt.text();
+        for index in 0..70 {
+            let expected = format!("Earlier history line {index}");
+            assert_eq!(
+                lines.iter().filter(|line| **line == expected).count(),
+                1,
+                "queued diff lost or duplicated {expected}: {lines:?}"
+            );
+        }
     }
 
     #[test]

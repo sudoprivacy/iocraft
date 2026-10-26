@@ -29,6 +29,7 @@ fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }) = event
         {
             match code {
+                KeyCode::F(1) => phase.set(1),
                 KeyCode::F(2) => {
                     first.print("SharedPartial");
                     phase.set(2);

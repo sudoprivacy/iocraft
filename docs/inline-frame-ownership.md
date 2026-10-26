@@ -55,6 +55,26 @@ CI runs it alongside slow, rapid and interleaved resize on Unix and bundled
 ConPTY. A frame that exceeds its viewport still has the limitations below; the
 original 30x8 diagnostic is retained unchanged.
 
+### A queued frame during height shrink (2026-10-26)
+
+A frontend resize can overtake an already emitted frame, after the final OS
+size preflight. Descending from a start anchor with CSI E then clamps at the
+new viewport bottom; the subsequent backward diff can overwrite caller history.
+The descent now uses newlines, so it traverses the complete old-frame distance
+even when that requires scrolling. Stable-size frames retain incremental row
+diffing and reuse their existing rows.
+
+If the next cursor sample cannot substantiate the projected start, recovery
+clears only from the parked cursor downward. Rows above that owned boundary
+remain untouched. Unknown columns or missing cursor samples still use the
+existing conservative recovery. This does not make inaccessible live rows
+erasable or repair host-specific scrollback loss.
+
+The real-PTY `queued-frame` scenario forces a resize after receiving an old-size
+frame and before parsing it, then checks shrink and restoration. It retains
+all 70 history lines, committed output, live markers and draft exactly once.
+Both Unix CI hosts and bundled ConPTY run it with the history-gap matrix.
+
 ### Reuse shifted inline rows
 
 For bounded canvases at a stable width, growing prose can retain the existing
