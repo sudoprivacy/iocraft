@@ -7,6 +7,7 @@ use std::{
     env,
     fmt::{self, Display},
     io::{self, Write},
+    ops::Range,
     sync::{Arc, Once, OnceLock},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -359,13 +360,27 @@ impl Canvas {
     /// state.
     fn write_row_impl<W: Write>(&self, y: usize, mut w: W, ansi: bool) -> io::Result<()> {
         let row = self.row(y).unwrap_or(&[]);
+        self.write_row_range(y, 0..row.len(), &mut w, ansi, true)
+    }
+
+    /// Paint a range with independent SGR/link state. A partial range must not
+    /// erase the unchanged suffix; a default-only tail can still use EL.
+    fn write_row_range<W: Write>(
+        &self,
+        y: usize,
+        range: Range<usize>,
+        mut w: W,
+        ansi: bool,
+        clear_tail: bool,
+    ) -> io::Result<()> {
+        let row = self.cells.get(y).map(Vec::as_slice).unwrap_or(&[]);
 
         let mut background_color = None;
         let mut hyperlink: Option<Arc<str>> = None;
         let mut text_style = CanvasTextStyle::default();
-        let mut col = 0;
+        let mut col = range.start;
         let mut did_clear_line = false;
-        while col < row.len() {
+        while col < range.end {
             let cell = &row[col];
 
             if ansi {
@@ -442,7 +457,7 @@ impl Canvas {
                 col += 1;
             }
 
-            if ansi && col >= self.width {
+            if ansi && clear_tail && col >= self.width {
                 if hyperlink.is_some() {
                     write!(w, "\x1b]8;;\x1b\\")?; // close any open OSC 8 link
                     hyperlink = None;
@@ -487,7 +502,7 @@ impl Canvas {
             if background_color.is_some() {
                 write!(w, csi!("{}m"), Colored::BackgroundColor(Color::Reset))?;
             }
-            if !did_clear_line {
+            if clear_tail && !did_clear_line {
                 write!(w, csi!("K"))?;
             }
             write!(w, csi!("0m"))?;
@@ -507,6 +522,72 @@ impl Canvas {
         w: W,
     ) -> io::Result<()> {
         self.write_row_impl(y, w, true)
+    }
+
+    /// Update only changed cells when both canvases own the same row geometry.
+    /// Glyph boundaries include the old glyph too, so replacing/removing a wide
+    /// character never leaves its other cell behind or starts inside it.
+    pub(crate) fn write_ansi_row_diff<W: Write>(
+        &self,
+        previous: &Self,
+        y: usize,
+        mut w: W,
+    ) -> io::Result<()> {
+        if self.width != previous.width || previous.cells.get(y).is_none() {
+            return self.write_ansi_row_without_newline(y, w);
+        }
+        let Some(current) = self.cells.get(y) else {
+            return Ok(());
+        };
+        let old = &previous.cells[y];
+        let Some(start) = current.iter().zip(old).position(|(a, b)| a != b) else {
+            return Ok(());
+        };
+        let end = current
+            .iter()
+            .zip(old)
+            .rposition(|(a, b)| a != b)
+            .expect("changed cell")
+            + 1;
+        let mut range = start..end;
+        loop {
+            let before = range.clone();
+            for row in [old, current] {
+                let mut column = 0;
+                while column < range.end {
+                    let width = row[column]
+                        .character
+                        .as_ref()
+                        .map_or(1, |ch| ch.value.width().max(1));
+                    if column < range.start && range.start < column + width {
+                        range.start = column;
+                    }
+                    if column < range.end && range.end < column + width {
+                        range.end = (column + width).min(self.width);
+                    }
+                    column += width;
+                }
+            }
+            if before == range {
+                break;
+            }
+        }
+        if range.start > 0 {
+            let column = u16::try_from(range.start).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "canvas column exceeds terminal geometry",
+                )
+            })?;
+            use crossterm::QueueableCommand;
+            w.queue(crossterm::cursor::MoveToColumn(column))?;
+        }
+        let content_end = self.row(y).map_or(0, <[CanvasCell]>::len);
+        let clear_tail = range.end >= content_end;
+        if clear_tail {
+            range.end = content_end.max(range.start);
+        }
+        self.write_row_range(y, range, w, true, clear_tail)
     }
 
     fn write_impl<W: Write>(
@@ -721,6 +802,147 @@ impl CanvasSubviewMut<'_> {
 
 #[cfg(test)]
 mod tests {
+    fn prompt_canvas(text: &str, width: usize) -> super::Canvas {
+        let mut canvas = super::Canvas::new(width, 3);
+        let mut view = canvas.subview_mut(0, 0, 0, 0, width, 3);
+        view.set_background_color(0, 0, width, 1, crate::Color::Blue);
+        view.set_text(
+            0,
+            0,
+            text,
+            super::CanvasTextStyle {
+                color: Some(crate::Color::White),
+                ..Default::default()
+            },
+        );
+        view.set_text(0, 1, "Unchanged suffix", super::CanvasTextStyle::default());
+        view.set_text(0, 2, "FOOTER", super::CanvasTextStyle::default());
+        canvas
+    }
+
+    #[test]
+    fn changed_cells_match_a_fresh_paint_without_touching_the_suffix() {
+        for (old, new) in [
+            ("❯ draft", "❯ drafts"),
+            ("❯ drafts", "❯ draft"),
+            ("❯ 你🙂e\u{301} tail", "❯ x🙂e\u{301} tail"),
+            ("❯ x🙂e\u{301} tail", "❯ 你🙂e\u{301} tail"),
+            ("❯ 你 wide", "❯ "),
+            ("❯ good", ""),
+        ] {
+            let previous = prompt_canvas(old, 80);
+            let next = prompt_canvas(new, 80);
+            let mut initial = Vec::new();
+            previous
+                .write_ansi_without_final_newline(&mut initial)
+                .unwrap();
+            let mut diff = Vec::new();
+            next.write_ansi_row_diff(&previous, 0, &mut diff).unwrap();
+            assert!(!String::from_utf8_lossy(&diff).contains("FOOTER"));
+            let mut observed = avt::Vt::new(80, 5);
+            observed.feed_str(&String::from_utf8(initial).unwrap());
+            observed.feed_str("\x1b[1;1H");
+            observed.feed_str(&String::from_utf8(diff).unwrap());
+            let mut full = Vec::new();
+            next.write_ansi_without_final_newline(&mut full).unwrap();
+            let mut expected = avt::Vt::new(80, 5);
+            expected.feed_str(&String::from_utf8(full).unwrap());
+            for row in 0..3 {
+                assert_eq!(
+                    observed.line(row).text(),
+                    expected.line(row).text(),
+                    "{old:?} -> {new:?}"
+                );
+                for column in 0..80 {
+                    let actual = &observed.line(row)[column];
+                    let reference = &expected.line(row)[column];
+                    assert_eq!(
+                        actual.width(),
+                        reference.width(),
+                        "glyph boundary at {column}"
+                    );
+                    assert_eq!(
+                        actual.pen().background(),
+                        reference.pen().background(),
+                        "background at {column}"
+                    );
+                    if next.cell(column, row).unwrap().text().is_some() {
+                        assert_eq!(actual.pen(), reference.pen(), "text style at {column}");
+                    } else {
+                        // Empty canvas cells specify background, not the
+                        // invisible foreground inherited by a printed space.
+                        assert_eq!(actual.pen().is_underline(), reference.pen().is_underline());
+                        assert_eq!(actual.pen().is_inverse(), reference.pen().is_inverse());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_shaded_prompt_edit_does_not_replay_its_unchanged_padding() {
+        let previous = prompt_canvas("❯ draft", 200);
+        let next = prompt_canvas("❯ drafts", 200);
+        let mut diff = Vec::new();
+        next.write_ansi_row_diff(&previous, 0, &mut diff).unwrap();
+        assert!(
+            diff.len() < 64,
+            "one edit must not replay 200 colored cells: {diff:?}"
+        );
+        let mut same = Vec::new();
+        next.write_ansi_row_diff(&next, 0, &mut same).unwrap();
+        assert!(same.is_empty());
+    }
+
+    #[test]
+    fn shrinking_plain_text_clears_only_the_default_tail() {
+        let mut previous = super::Canvas::new(40, 2);
+        previous.subview_mut(0, 0, 0, 0, 40, 2).set_text(
+            0,
+            0,
+            "prefix and an old tail",
+            super::CanvasTextStyle::default(),
+        );
+        let mut next = super::Canvas::new(40, 2);
+        next.subview_mut(0, 0, 0, 0, 40, 2).set_text(
+            0,
+            0,
+            "prefix",
+            super::CanvasTextStyle::default(),
+        );
+        let mut initial = Vec::new();
+        previous
+            .write_ansi_without_final_newline(&mut initial)
+            .unwrap();
+        let mut diff = Vec::new();
+        next.write_ansi_row_diff(&previous, 0, &mut diff).unwrap();
+        assert!(diff.len() < 20);
+        let mut vt = avt::Vt::new(40, 4);
+        vt.feed_str(&String::from_utf8(initial).unwrap());
+        vt.feed_str("\x1b[1;1H");
+        vt.feed_str(&String::from_utf8(diff).unwrap());
+        assert_eq!(vt.line(0).text().trim_end(), "prefix");
+    }
+
+    #[test]
+    fn partial_link_updates_close_their_own_hyperlink_scope() {
+        let previous = prompt_canvas("prefix linked suffix", 80);
+        let mut next = prompt_canvas("prefix linked suffix", 80);
+        next.subview_mut(0, 0, 0, 0, 80, 3).set_hyperlink(
+            7,
+            0,
+            6,
+            1,
+            Some(std::sync::Arc::from("https://example.com/new;target")),
+        );
+        let mut diff = Vec::new();
+        next.write_ansi_row_diff(&previous, 0, &mut diff).unwrap();
+        let wire = String::from_utf8(diff).unwrap();
+        assert!(wire.contains("\x1b]8;;https://example.com/new;target\x1b\\linked"));
+        assert!(wire.contains("\x1b]8;;\x1b\\"));
+        assert!(!wire.contains("suffix"));
+    }
+
     #[test]
     fn reused_canvas_drops_old_text_background_and_links_on_resize() {
         let mut canvas = super::Canvas::new(8, 2);

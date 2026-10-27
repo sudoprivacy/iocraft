@@ -595,7 +595,7 @@ impl TerminalImpl for StdTerminal<'_> {
                 }
                 self.dest.queue(cursor::MoveTo(0, top_row + y as u16))?;
                 if y < canvas.height() {
-                    canvas.write_ansi_row_without_newline(y, &mut self.dest)?;
+                    canvas.write_ansi_row_diff(prev, y, &mut self.dest)?;
                 } else {
                     self.dest
                         .queue(terminal::Clear(terminal::ClearType::CurrentLine))?;
@@ -691,7 +691,12 @@ impl TerminalImpl for StdTerminal<'_> {
             current_y = y;
 
             if y < new_height {
-                canvas.write_ansi_row_without_newline(y, &mut self.dest)?;
+                if shift.is_none() {
+                    canvas.write_ansi_row_diff(prev, y, &mut self.dest)?;
+                } else {
+                    // Insert/delete operations changed the physical row owner.
+                    canvas.write_ansi_row_without_newline(y, &mut self.dest)?;
+                }
             } else {
                 self.dest
                     .queue(terminal::Clear(terminal::ClearType::CurrentLine))?;
@@ -2425,12 +2430,20 @@ mod tests {
         let mut vt = avt::Vt::new(width, height + 4);
         vt.feed_str(&String::from_utf8(setup).unwrap());
 
-        // Row 1's diff landed at terminal line 3 (offset 2+1) instead of 1,
-        // overwriting row 3's original content.
+        // The changed background lands on row 3 with a stale origin. Cell
+        // damage no longer rewrites the unrelated row text to demonstrate it.
         assert_eq!(
             vt.line(3).text(),
-            "row1      ",
-            "row 1's diff landed at terminal line 3 (offset 2+1) instead of line 1"
+            "row3      ",
+            "unchanged text is preserved even when the origin is wrong"
+        );
+        assert!(
+            vt.line(3)[0].pen().background().is_some(),
+            "the highlight is misplaced onto row 3"
+        );
+        assert!(
+            vt.line(1)[0].pen().background().is_none(),
+            "the intended row did not receive its highlight"
         );
     }
 
