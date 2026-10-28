@@ -69,24 +69,24 @@ impl RowShift {
     }
 
     fn savings(&self, previous: &Canvas, next: &Canvas) -> usize {
-        let (reused, cleared) = match *self {
-            Self::Insert { first, count } => (first + count..next.height(), first..first + count),
+        let reused = match *self {
+            Self::Insert { first, count } => first + count..next.height(),
             Self::Scroll {
-                first,
-                count,
-                retained,
-            } => (
-                first..first + retained,
-                first + retained..first + retained + count,
-            ),
+                first, retained, ..
+            } => first..first + retained,
         };
+        if reused.is_empty() {
+            return 0;
+        }
         let saved: usize = reused
             .filter(|&row| !previous.row_eq(next, row))
-            .map(|row| row_bytes(next, row))
+            .map(|row| diff_bytes(previous, next, row))
             .sum();
-        let added: usize = cleared
-            .filter(|&row| previous.row_eq(next, row))
-            .map(|row| row_bytes(next, row))
+        // Shifted frames repaint complete remaining rows because their old
+        // physical owners changed. Include that cost against cell damage.
+        let added: usize = (0..next.height())
+            .filter(|&row| !self.row_unchanged(previous, next, row))
+            .map(|row| row_bytes(next, row).saturating_sub(diff_bytes(previous, next, row)))
             .sum();
         // Covers eight extra newlines or the bounded cursor/line commands.
         // Count row bytes with the painter itself so styles and wide cells do
@@ -157,5 +157,12 @@ fn row_bytes(canvas: &Canvas, row: usize) -> usize {
     canvas
         .write_ansi_row_without_newline(row, &mut counter)
         .expect("counting an ANSI row cannot fail");
+    counter.0
+}
+
+fn diff_bytes(previous: &Canvas, next: &Canvas, row: usize) -> usize {
+    let mut counter = ByteCounter::default();
+    next.write_ansi_row_diff(previous, row, &mut counter)
+        .expect("counting an ANSI difference cannot fail");
     counter.0
 }
