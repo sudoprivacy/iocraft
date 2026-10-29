@@ -30,6 +30,9 @@ static ANSI_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(ANSI_REGEX_PATTERN).expect("valid ANSI regex"));
 
 pub(crate) fn strip_ansi(string: &str) -> Cow<'_, str> {
+    if !string.contains(['\x1b', '\u{009b}']) {
+        return Cow::Borrowed(string);
+    }
     ANSI_REGEX.replace_all(string, "")
 }
 
