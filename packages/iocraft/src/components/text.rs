@@ -90,6 +90,7 @@ pub struct TextProps {
 /// ```
 #[derive(Default)]
 pub struct Text {
+    measured: bool,
     style: CanvasTextStyle,
     content: String,
     wrap: TextWrap,
@@ -291,11 +292,15 @@ impl Component for Text {
             italic: props.italic,
             invert: props.invert,
         };
-        self.content = strip_ansi(&props.content).into_owned();
+        let content = strip_ansi(&props.content);
+        if !self.measured || self.content != content || self.wrap != props.wrap {
+            self.measured = true;
+            self.content = content.into_owned();
+            updater.set_measure_func(Self::measure_func(self.content.clone(), props.wrap));
+        }
         self.wrap = props.wrap;
         self.align = props.align;
         self.hyperlink = props.hyperlink.clone();
-        updater.set_measure_func(Self::measure_func(self.content.clone(), props.wrap));
     }
 
     fn draw(&mut self, drawer: &mut ComponentDrawer<'_>) {

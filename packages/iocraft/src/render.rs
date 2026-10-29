@@ -20,8 +20,30 @@ use futures::{
 use std::io;
 use taffy::{
     AvailableSpace, Dimension, Display, Layout, NodeId, Overflow, Point, Rect, Size, Style,
-    TaffyTree,
+    TaffyTree, TraversePartialTree,
 };
+
+// Taffy invalidates ancestor caches even when assigned the same style or
+// children. Preserve those caches until an actual layout dependency changes.
+fn set_style_if_changed(engine: &mut LayoutEngine, node: NodeId, style: Style) {
+    if engine.style(node).expect("the layout node exists") != &style {
+        engine
+            .set_style(node, style)
+            .expect("the layout node exists");
+    }
+}
+
+fn set_children_if_changed(engine: &mut LayoutEngine, node: NodeId, children: &[NodeId]) {
+    if !engine.child_ids(node).eq(children.iter().copied())
+        || children
+            .iter()
+            .any(|child| engine.parent(*child) != Some(node))
+    {
+        engine
+            .set_children(node, children)
+            .expect("the layout node exists");
+    }
+}
 
 pub(crate) struct UpdateContext<'a, 'w> {
     terminal: Option<&'a mut Terminal<'w>>,
@@ -102,10 +124,7 @@ impl<'a, 'b, 'c, 'w> ComponentUpdater<'a, 'b, 'c, 'w> {
 
     /// Sets the layout style of the current component.
     pub fn set_layout_style(&mut self, layout_style: taffy::style::Style) {
-        self.context
-            .layout_engine
-            .set_style(self.node_id, layout_style)
-            .expect("we should be able to set the style");
+        set_style_if_changed(self.context.layout_engine, self.node_id, layout_style);
     }
 
     /// Sets the measure function of the current component, which is invoked to calculate the area
@@ -127,16 +146,14 @@ impl<'a, 'b, 'c, 'w> ComponentUpdater<'a, 'b, 'c, 'w> {
     /// layout purposes.
     pub fn set_transparent_layout(&mut self, transparent_layout: bool) {
         if transparent_layout && !self.transparent_layout {
-            self.context
-                .layout_engine
-                .set_style(
-                    self.node_id,
-                    Style {
-                        display: Display::None,
-                        ..Default::default()
-                    },
-                )
-                .expect("we should be able to set the style");
+            set_style_if_changed(
+                self.context.layout_engine,
+                self.node_id,
+                Style {
+                    display: Display::None,
+                    ..Default::default()
+                },
+            );
         }
         self.transparent_layout = transparent_layout;
     }
@@ -196,10 +213,11 @@ impl<'a, 'b, 'c, 'w> ComponentUpdater<'a, 'b, 'c, 'w> {
                     used_components.push_back(child.key().clone(), component);
                 }
 
-                self.context
-                    .layout_engine
-                    .set_children(self.node_id, &direct_child_node_ids)
-                    .expect("we should be able to set the children");
+                set_children_if_changed(
+                    self.context.layout_engine,
+                    self.node_id,
+                    &direct_child_node_ids,
+                );
 
                 for component in self.children.components.iter() {
                     self.context
@@ -404,25 +422,26 @@ impl<'a> Tree<'a> {
                 },
             );
         }
-        self.layout_engine
-            .set_children(self.wrapper_node_id, &wrapper_child_node_ids)
-            .expect("we should be able to set the children");
+        set_children_if_changed(
+            &mut self.layout_engine,
+            self.wrapper_node_id,
+            &wrapper_child_node_ids,
+        );
 
         // Set wrapper max width for `width: 100pct` to work because available_space in
         // compute_layout_with_measure is not enough:
         if let Some(w) = max_width {
-            self.layout_engine
-                .set_style(
-                    self.wrapper_node_id,
-                    Style {
-                        size: Size {
-                            width: Dimension::Length(w as _),
-                            height: Dimension::Auto,
-                        },
-                        ..Default::default()
+            set_style_if_changed(
+                &mut self.layout_engine,
+                self.wrapper_node_id,
+                Style {
+                    size: Size {
+                        width: Dimension::Length(w as _),
+                        height: Dimension::Auto,
                     },
-                )
-                .expect("we should be able to set the style");
+                    ..Default::default()
+                },
+            );
         }
 
         self.layout_engine
@@ -630,6 +649,64 @@ mod tests {
     use core::future::Future;
     use macro_rules_attribute::apply;
     use smol_macros::test;
+
+    #[derive(Default, Props)]
+    struct ChangingTextProps {
+        step: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[component]
+    fn ChangingText(props: &ChangingTextProps) -> impl Into<AnyElement<'static>> {
+        let step = props.step.load(std::sync::atomic::Ordering::Relaxed);
+        let mut body = MixedTextContent::new(match step {
+            0 => String::new(),
+            1 => "alpha 你🙂 e\u{301}\n\ntrailing  ".to_string(),
+            2 => "replacement words wrap across the available width".to_string(),
+            3 => "\n \n".to_string(),
+            5 => format!("{}TAIL", "line\n".repeat(700)),
+            _ => "short".to_string(),
+        });
+        body.color = Some(if step == 2 { Color::Red } else { Color::Blue });
+        if step == 2 {
+            body.background_color = Some(Color::DarkGrey);
+            body.hyperlink = Some("https://example.com/replacement".to_string());
+        }
+        element! {
+            View(width: 100pct, flex_direction: FlexDirection::Column) {
+                #((step != 4).then(|| element! { Text(content: "HEADER") }))
+                MixedText(contents: vec![body], align: if step == 2 { TextAlign::Right } else { TextAlign::Left })
+                Text(content: "FOOTER")
+            }
+        }
+    }
+
+    #[test]
+    fn retained_text_matches_fresh_layout_after_content_style_children_and_width_changes() {
+        let step = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut app = element! { ChangingText(step: step.clone()) };
+        let helper = app.helper();
+        let mut tree = Tree::new(app.props_mut(), helper);
+        for (value, width) in [
+            (0, 20),
+            (0, 20),
+            (1, 20),
+            (1, 20),
+            (1, 8),
+            (2, 8),
+            (2, 30),
+            (3, 30),
+            (4, 30),
+            (4, 30),
+            (5, 20),
+            (5, 20),
+            (1, 8),
+        ] {
+            step.store(value, std::sync::atomic::Ordering::Relaxed);
+            let actual = tree.render(Some(width), None);
+            let fresh = element! { ChangingText(step: step.clone()) }.render(Some(width));
+            assert!(actual == fresh, "step {value}, width {width}: {}", actual);
+        }
+    }
 
     #[derive(Default, Props)]
     struct MyInnerComponentProps {
