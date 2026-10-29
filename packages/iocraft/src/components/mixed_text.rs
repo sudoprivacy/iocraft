@@ -1,4 +1,5 @@
 use crate::{
+    canvas::CanvasRows,
     components::text::{Text, TextAlign, TextDecoration, TextDrawer, TextWrap},
     segmented_string::SegmentedString,
     strip_ansi::strip_ansi,
@@ -140,6 +141,25 @@ pub struct MixedText {
     contents: Vec<MixedTextContent>,
     wrap: TextWrap,
     align: TextAlign,
+    paint_layout: Option<PaintLayout>,
+}
+
+// Keep byte ranges into `contents`, so retained components can repaint without
+// repeating Unicode line breaking or retaining a second copy of the text.
+struct PaintLayout {
+    width: usize,
+    x_offset: usize,
+    lines: Vec<PaintLine>,
+    raster: Option<CanvasRows>,
+}
+
+struct PaintSpan {
+    content: usize,
+    range: std::ops::Range<usize>,
+}
+struct PaintLine {
+    padding: usize,
+    spans: Vec<PaintSpan>,
 }
 
 impl Component for MixedText {
@@ -164,6 +184,8 @@ impl Component for MixedText {
             .map(|content| content.text.as_str())
             .collect::<Vec<_>>()
             .join("");
+        // Ranges and alignment belong to these exact contents and wrap mode.
+        self.paint_layout = None;
         self.contents = props.contents.clone();
         self.wrap = props.wrap;
         self.align = props.align;
@@ -171,54 +193,78 @@ impl Component for MixedText {
     }
 
     fn draw(&mut self, drawer: &mut ComponentDrawer<'_>) {
-        let width = drawer.layout().size.width;
-        let segmented_string: SegmentedString = self
-            .contents
-            .iter()
-            .map(|content| content.text.as_str())
-            .collect();
-        let lines = segmented_string.wrap(match self.wrap {
-            TextWrap::Wrap => width as usize,
-            TextWrap::NoWrap => usize::MAX,
-        });
-
-        let paddings = lines
-            .iter()
-            .map(|line| Text::alignment_padding(line.width, self.align, width as _))
-            .collect::<Vec<_>>();
-        let x_offset = paddings.iter().copied().min().unwrap_or(0);
-
-        let mut drawer = TextDrawer::new(drawer, x_offset, self.align != TextAlign::Left);
-        for (mut line, padding) in lines.into_iter().zip(paddings) {
-            // Painted trailing cells are part of a diff/selection surface.
-            // Trimming them would erase its fill on shorter wrapped rows.
-            let painted_tail = line
-                .segments
+        let width = drawer.layout().size.width as usize;
+        if self
+            .paint_layout
+            .as_ref()
+            .is_none_or(|layout| layout.width != width)
+        {
+            let text: SegmentedString = self
+                .contents
                 .iter()
-                .rfind(|segment| !segment.text.is_empty())
-                .is_some_and(|segment| self.contents[segment.index].background_color.is_some());
-            if self.wrap == TextWrap::Wrap && !painted_tail {
-                line.trim_end();
+                .map(|content| content.text.as_str())
+                .collect();
+            let lines = text.wrap(if self.wrap == TextWrap::Wrap {
+                width
+            } else {
+                usize::MAX
+            });
+            let mut prepared = Vec::with_capacity(lines.len());
+            for mut line in lines {
+                let padding = Text::alignment_padding(line.width, self.align, width) as usize;
+                // Painted trailing cells are part of a diff/selection surface.
+                // Trimming them would erase its fill on shorter wrapped rows.
+                let painted_tail = line
+                    .segments
+                    .iter()
+                    .rfind(|span| !span.text.is_empty())
+                    .is_some_and(|span| self.contents[span.index].background_color.is_some());
+                if self.wrap == TextWrap::Wrap && !painted_tail {
+                    line.trim_end();
+                }
+                let spans = line
+                    .segments
+                    .into_iter()
+                    .map(|span| PaintSpan {
+                        content: span.index,
+                        range: span.offset..span.offset + span.text.len(),
+                    })
+                    .collect();
+                prepared.push(PaintLine { padding, spans });
             }
-            // Trimming can remove every span of a blank/whitespace-only row.
-            // It still occupies a measured row: advancing only inside the
-            // span loop shifts every later paragraph and scroll coordinate.
-            if line.segments.is_empty() {
-                drawer.append_lines(["", ""], CanvasTextStyle::default(), None);
+            let x_offset = prepared.iter().map(|line| line.padding).min().unwrap_or(0);
+            self.paint_layout = Some(PaintLayout {
+                width,
+                x_offset,
+                lines: prepared,
+                raster: None,
+            });
+        }
+        let layout = self.paint_layout.as_ref().expect("prepared paint layout");
+        if let Some(rows) = &layout.raster {
+            if drawer.canvas().restore_rows(rows) {
+                return;
+            }
+        }
+        let cacheable = drawer.canvas().has_pristine_rows();
+        let mut painter =
+            TextDrawer::new(drawer, layout.x_offset as _, self.align != TextAlign::Left);
+        for line in &layout.lines {
+            // Blank rows still occupy measured rows after whitespace trimming.
+            if line.spans.is_empty() {
+                painter.append_lines(["", ""], CanvasTextStyle::default(), None);
                 continue;
             }
-
-            let additional_padding = padding - x_offset;
-            if additional_padding > 0 {
-                drawer.append_lines(
-                    [format!("{:width$}", "", width = additional_padding as usize).as_str()],
+            let padding = line.padding - layout.x_offset;
+            if padding > 0 {
+                painter.append_lines(
+                    [" ".repeat(padding).as_str()],
                     CanvasTextStyle::default(),
                     None,
                 );
             }
-            let mut segments = line.segments.into_iter().peekable();
-            while let Some(segment) = segments.next() {
-                let content = &self.contents[segment.index];
+            for (index, span) in line.spans.iter().enumerate() {
+                let content = &self.contents[span.content];
                 let style = CanvasTextStyle {
                     color: content.color,
                     weight: content.weight,
@@ -228,22 +274,30 @@ impl Component for MixedText {
                     italic: content.italic,
                     invert: content.invert,
                 };
-                if segments.peek().is_some() {
-                    drawer.append_lines_with_background(
-                        [segment.text],
+                let text = &content.text[span.range.clone()];
+                if index + 1 == line.spans.len() {
+                    painter.append_lines_with_background(
+                        [text, ""],
                         style,
                         content.hyperlink.as_deref(),
                         content.background_color,
                     );
                 } else {
-                    drawer.append_lines_with_background(
-                        [segment.text, ""],
+                    painter.append_lines_with_background(
+                        [text],
                         style,
                         content.hyperlink.as_deref(),
                         content.background_color,
                     );
                 }
             }
+        }
+        drop(painter);
+        if cacheable {
+            self.paint_layout
+                .as_mut()
+                .expect("prepared paint layout")
+                .raster = drawer.canvas().capture_rows();
         }
     }
 }

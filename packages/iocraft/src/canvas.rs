@@ -7,7 +7,7 @@ use std::{
     env,
     fmt::{self, Display},
     io::{self, Write},
-    ops::Range,
+    ops::{Deref, Range},
     sync::{Arc, Once, OnceLock},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -143,11 +143,55 @@ impl CanvasCell {
 ///
 /// - When implementing low-level components, you'll need to utilize the `Canvas` drawing methods.
 /// - When implementing unit tests for components, you may want to render to a `Canvas` for inspection.
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub struct Canvas {
     width: usize,
-    cells: Vec<Vec<CanvasCell>>,
+    cells: Vec<CanvasRow>,
+    empty_row: Arc<Vec<CanvasCell>>,
 }
+
+#[derive(Clone)]
+struct CanvasRow {
+    cells: Arc<Vec<CanvasCell>>,
+    pristine: bool,
+}
+
+impl CanvasRow {
+    #[inline]
+    fn writable(&mut self) -> &mut Vec<CanvasCell> {
+        self.pristine = false;
+        Arc::make_mut(&mut self.cells)
+    }
+}
+
+impl Deref for CanvasRow {
+    type Target = Vec<CanvasCell>;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.cells
+    }
+}
+
+impl PartialEq for CanvasRow {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.cells, &other.cells) || self.cells == other.cells
+    }
+}
+
+impl PartialEq for Canvas {
+    fn eq(&self, other: &Self) -> bool {
+        self.width == other.width && self.cells == other.cells
+    }
+}
+
+pub(crate) struct CanvasRows {
+    width: usize,
+    rows: Vec<CanvasRow>,
+}
+
+const MAX_CACHED_CELLS: usize = 16 * 1024;
 
 impl Canvas {
     /// Constructs a new canvas with the given dimensions.
@@ -155,6 +199,7 @@ impl Canvas {
         let mut canvas = Self {
             width,
             cells: Vec::new(),
+            empty_row: Arc::new(Vec::new()),
         };
         canvas.clear_and_resize(width, height);
         canvas
@@ -163,13 +208,26 @@ impl Canvas {
     pub(crate) fn clear_and_resize(&mut self, width: usize, height: usize) {
         let is_narrower = width < self.width;
         self.width = width;
-        self.cells.resize_with(height, Vec::new);
+        if self.empty_row.len() != width {
+            self.empty_row = Arc::new(vec![CanvasCell::default(); width]);
+        }
+        self.cells.resize_with(height, || CanvasRow {
+            cells: Arc::clone(&self.empty_row),
+            pristine: true,
+        });
         for row in &mut self.cells {
-            row.clear();
-            if is_narrower {
-                row.shrink_to(width);
+            // Reuse uniquely owned allocations; retained painted rows stay
+            // immutable while the next frame starts with shared blank rows.
+            if let Some(cells) = Arc::get_mut(&mut row.cells) {
+                cells.clear();
+                if is_narrower {
+                    cells.shrink_to(width);
+                }
+                cells.resize_with(width, CanvasCell::default);
+            } else if !Arc::ptr_eq(&row.cells, &self.empty_row) {
+                row.cells = Arc::clone(&self.empty_row);
             }
-            row.resize_with(width, CanvasCell::default);
+            row.pristine = true;
         }
     }
 
@@ -229,7 +287,7 @@ impl Canvas {
 
     fn clear_text(&mut self, x: usize, y: usize, w: usize, h: usize) {
         for y in y..y + h {
-            if let Some(row) = self.cells.get_mut(y) {
+            if let Some(row) = self.cells.get_mut(y).map(CanvasRow::writable) {
                 for x in x..x + w {
                     if x < row.len() {
                         row[x].character = None;
@@ -241,7 +299,7 @@ impl Canvas {
 
     fn set_background_color(&mut self, x: usize, y: usize, w: usize, h: usize, color: Color) {
         for y in y..y + h {
-            if let Some(row) = self.cells.get_mut(y) {
+            if let Some(row) = self.cells.get_mut(y).map(CanvasRow::writable) {
                 for x in x..x + w {
                     if x < row.len() {
                         row[x].background_color = Some(color);
@@ -253,7 +311,7 @@ impl Canvas {
 
     fn set_hyperlink(&mut self, x: usize, y: usize, w: usize, h: usize, url: Option<Arc<str>>) {
         for y in y..y + h {
-            if let Some(row) = self.cells.get_mut(y) {
+            if let Some(row) = self.cells.get_mut(y).map(CanvasRow::writable) {
                 for x in x..x + w {
                     if x < row.len() {
                         row[x].hyperlink = url.clone();
@@ -268,7 +326,7 @@ impl Canvas {
         I: IntoIterator<Item = char>,
     {
         // Divide the string up into characters, which may consist of multiple Unicode code points.
-        let row = &mut self.cells[y];
+        let row = self.cells[y].writable();
         let style = Arc::new(style);
         let mut buf = String::new();
         for c in chars.into_iter() {
@@ -348,7 +406,13 @@ impl Canvas {
 
     #[inline]
     pub(crate) fn row_eq_at(&self, other: &Self, row: usize, other_row: usize) -> bool {
-        self.width == other.width && self.row(row) == other.row(other_row)
+        self.width == other.width
+            && (self
+                .cells
+                .get(row)
+                .zip(other.cells.get(other_row))
+                .is_some_and(|(a, b)| Arc::ptr_eq(&a.cells, &b.cells))
+                || self.row(row) == other.row(other_row))
     }
 
     /// Writes a single row.
@@ -373,7 +437,7 @@ impl Canvas {
         ansi: bool,
         clear_tail: bool,
     ) -> io::Result<()> {
-        let row = self.cells.get(y).map(Vec::as_slice).unwrap_or(&[]);
+        let row = self.cells.get(y).map(|row| row.as_slice()).unwrap_or(&[]);
 
         let mut background_color = None;
         let mut hyperlink: Option<Arc<str>> = None;
@@ -540,12 +604,12 @@ impl Canvas {
             return Ok(());
         };
         let old = &previous.cells[y];
-        let Some(start) = current.iter().zip(old).position(|(a, b)| a != b) else {
+        let Some(start) = current.iter().zip(old.iter()).position(|(a, b)| a != b) else {
             return Ok(());
         };
         let end = current
             .iter()
-            .zip(old)
+            .zip(old.iter())
             .rposition(|(a, b)| a != b)
             .expect("changed cell")
             + 1;
@@ -654,6 +718,60 @@ pub struct CanvasSubviewMut<'a> {
 }
 
 impl CanvasSubviewMut<'_> {
+    #[inline]
+    fn cache_region(&self) -> Option<Range<usize>> {
+        let start = usize::try_from(self.y).ok()?;
+        let end = usize::try_from(
+            self.clip_y
+                .saturating_add(self.clip_height.try_into().ok()?),
+        )
+        .ok()?
+        .min(self.canvas.height());
+        if self.x != 0
+            || self.clip_x != 0
+            || self.clip_y > self.y
+            || self.clip_width < self.canvas.width
+            || self.canvas.width == 0
+            || start >= end
+            || self.canvas.width.saturating_mul(end - start) > MAX_CACHED_CELLS
+        {
+            return None;
+        }
+        Some(start..end)
+    }
+
+    #[inline]
+    pub(crate) fn has_pristine_rows(&self) -> bool {
+        self.cache_region()
+            .is_some_and(|range| self.canvas.cells[range].iter().all(|row| row.pristine))
+    }
+
+    pub(crate) fn capture_rows(&self) -> Option<CanvasRows> {
+        let range = self.cache_region()?;
+        Some(CanvasRows {
+            width: self.canvas.width,
+            rows: self.canvas.cells[range].to_vec(),
+        })
+    }
+
+    /// Reuse a full-width painting only over untouched cells. Colored parent
+    /// fills, overlapping siblings and partial clips use normal composition.
+    pub(crate) fn restore_rows(&mut self, rows: &CanvasRows) -> bool {
+        let Some(range) = self.cache_region() else {
+            return false;
+        };
+        if rows.width != self.canvas.width
+            || rows.rows.len() != range.len()
+            || !self.canvas.cells[range.clone()]
+                .iter()
+                .all(|row| row.pristine)
+        {
+            return false;
+        }
+        self.canvas.cells[range].clone_from_slice(&rows.rows);
+        true
+    }
+
     /// Returns a reference to a cell at the given **relative** subview position.
     ///
     /// Returns `None` if the resulting absolute position is out of bounds or
@@ -802,6 +920,85 @@ impl CanvasSubviewMut<'_> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retained_rows_preserve_unicode_links_and_previous_frames() {
+        use super::{Canvas, CanvasTextStyle};
+        let mut canvas = Canvas::new(24, 3);
+        let rows = {
+            let mut view = canvas.subview_mut(0, 0, 0, 0, 24, 3);
+            assert!(view.has_pristine_rows());
+            view.set_text(0, 0, "界🙂e\u{301}", CanvasTextStyle::default());
+            view.set_background_color(0, 0, 6, 1, crate::Color::Blue);
+            view.set_hyperlink(0, 0, 6, 1, Some("https://example.org".into()));
+            view.set_text(0, 2, "last row", CanvasTextStyle::default());
+            view.capture_rows().unwrap()
+        };
+        let previous = canvas.clone();
+        let mut original_wire = Vec::new();
+        previous.write_ansi(&mut original_wire).unwrap();
+        canvas.clear_and_resize(24, 3);
+        assert!(canvas.subview_mut(0, 0, 0, 0, 24, 3).restore_rows(&rows));
+        let mut restored_wire = Vec::new();
+        canvas.write_ansi(&mut restored_wire).unwrap();
+        assert_eq!(restored_wire, original_wire);
+        canvas.subview_mut(0, 0, 0, 0, 24, 3).set_text(
+            0,
+            0,
+            "new frame",
+            CanvasTextStyle::default(),
+        );
+        let mut previous_wire = Vec::new();
+        previous.write_ansi(&mut previous_wire).unwrap();
+        assert_eq!(
+            previous_wire, original_wire,
+            "painting must detach shared rows"
+        );
+        canvas.clear_and_resize(8, 2);
+        assert!(!canvas.subview_mut(0, 0, 0, 0, 8, 2).restore_rows(&rows));
+        let mut after_resize = Vec::new();
+        previous.write_ansi(&mut after_resize).unwrap();
+        assert_eq!(
+            after_resize, original_wire,
+            "resizing must retain old frames"
+        );
+    }
+
+    #[test]
+    fn retained_rows_preserve_parent_backgrounds_and_partial_clips() {
+        use super::{Canvas, CanvasTextStyle};
+        let mut source = Canvas::new(12, 3);
+        let mut view = source.subview_mut(0, 0, 0, 0, 12, 3);
+        view.set_text(0, 0, "cached", CanvasTextStyle::default());
+        let rows = view.capture_rows().unwrap();
+        let mut parent = Canvas::new(12, 3);
+        parent.subview_mut(0, 0, 0, 0, 12, 3).set_background_color(
+            0,
+            0,
+            12,
+            3,
+            crate::Color::Green,
+        );
+        let before = parent.clone();
+        assert!(!parent.subview_mut(0, 0, 0, 0, 12, 3).restore_rows(&rows));
+        assert!(
+            parent == before,
+            "retained text cannot replace a new parent fill"
+        );
+        for (x, y, clip_x, clip_y, width, height) in [
+            (1, 0, 0, 0, 12, 3),
+            (0, 0, 1, 0, 11, 3),
+            (0, 0, 0, 0, 8, 3),
+            (0, -1, 0, 0, 12, 3),
+            (0, 0, 0, 1, 12, 2),
+        ] {
+            let mut clipped = Canvas::new(12, 3);
+            assert!(!clipped
+                .subview_mut(x, y, clip_x, clip_y, width, height)
+                .restore_rows(&rows));
+            assert!(clipped.get_text(0, 0, 12, 3).trim().is_empty());
+        }
+    }
+
     fn prompt_canvas(text: &str, width: usize) -> super::Canvas {
         let mut canvas = super::Canvas::new(width, 3);
         let mut view = canvas.subview_mut(0, 0, 0, 0, width, 3);
