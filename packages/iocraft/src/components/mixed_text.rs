@@ -148,7 +148,7 @@ pub struct MixedText {
 // repeating Unicode line breaking or retaining a second copy of the text.
 struct PaintLayout {
     width: usize,
-    x_offset: usize,
+    x_offset: isize,
     lines: Vec<PaintLine>,
     raster: Option<CanvasRows>,
 }
@@ -158,7 +158,7 @@ struct PaintSpan {
     range: std::ops::Range<usize>,
 }
 struct PaintLine {
-    padding: usize,
+    padding: isize,
     spans: Vec<PaintSpan>,
 }
 
@@ -211,7 +211,7 @@ impl Component for MixedText {
             });
             let mut prepared = Vec::with_capacity(lines.len());
             for mut line in lines {
-                let padding = Text::alignment_padding(line.width, self.align, width) as usize;
+                let padding = Text::alignment_padding(line.width, self.align, width);
                 // Painted trailing cells are part of a diff/selection surface.
                 // Trimming them would erase its fill on shorter wrapped rows.
                 let painted_tail = line
@@ -247,8 +247,7 @@ impl Component for MixedText {
             }
         }
         let cacheable = drawer.canvas().has_pristine_rows();
-        let mut painter =
-            TextDrawer::new(drawer, layout.x_offset as _, self.align != TextAlign::Left);
+        let mut painter = TextDrawer::new(drawer, layout.x_offset, self.align != TextAlign::Left);
         for line in &layout.lines {
             // Blank rows still occupy measured rows after whitespace trimming.
             if line.spans.is_empty() {
@@ -258,7 +257,7 @@ impl Component for MixedText {
             let padding = line.padding - layout.x_offset;
             if padding > 0 {
                 painter.append_lines(
-                    [" ".repeat(padding).as_str()],
+                    [" ".repeat(padding as usize).as_str()],
                     CanvasTextStyle::default(),
                     None,
                 );
@@ -292,7 +291,6 @@ impl Component for MixedText {
                 }
             }
         }
-        drop(painter);
         if cacheable {
             self.paint_layout
                 .as_mut()
@@ -305,6 +303,23 @@ impl Component for MixedText {
 #[cfg(test)]
 mod tests {
     use crate::prelude::*;
+
+    #[test]
+    fn nowrap_alignment_clips_long_rows_without_losing_short_rows() {
+        for align in [TextAlign::Center, TextAlign::Right] {
+            let text = "abcdefghijk\nx";
+            let plain = element! {
+                View(width: 4) { Text(content: text, wrap: TextWrap::NoWrap, align) }
+            }
+            .render(None);
+            let mixed = element! {
+                View(width: 4) {
+                    MixedText(contents: vec![MixedTextContent::new(text)], wrap: TextWrap::NoWrap, align)
+                }
+            }.render(None);
+            assert_eq!(mixed.get_text(0, 0, 4, 2), plain.get_text(0, 0, 4, 2));
+        }
+    }
 
     #[test]
     fn mixed_text_keeps_blank_rows_in_the_measured_coordinate_space() {
