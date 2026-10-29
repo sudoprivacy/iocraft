@@ -1,4 +1,5 @@
 use crate::{
+    canvas::CanvasRows,
     components::text::{Text, TextAlign, TextDecoration, TextDrawer, TextWrap},
     segmented_string::SegmentedString,
     strip_ansi::strip_ansi,
@@ -143,6 +144,12 @@ pub struct MixedText {
     wrap: TextWrap,
     align: TextAlign,
     layout: Option<TextLayout>,
+    painted: Option<PaintedRows>,
+}
+
+struct PaintedRows {
+    width: usize,
+    rows: CanvasRows,
 }
 
 struct TextSegment {
@@ -243,6 +250,7 @@ impl Component for MixedText {
         }
         self.initialized = true;
         self.layout = None;
+        self.painted = None;
         let plaintext = props
             .contents
             .iter()
@@ -257,6 +265,12 @@ impl Component for MixedText {
 
     fn draw(&mut self, drawer: &mut ComponentDrawer<'_>) {
         let width = drawer.layout().size.width as usize;
+        if let Some(painted) = &self.painted {
+            if painted.width == width && drawer.canvas().restore_rows(&painted.rows) {
+                return;
+            }
+        }
+        let cacheable = drawer.canvas().has_pristine_rows();
         let mut uncached = None;
         if self
             .layout
@@ -276,19 +290,19 @@ impl Component for MixedText {
             .as_ref()
             .or(uncached.as_ref())
             .expect("prepared text layout");
-        let mut drawer = TextDrawer::new(drawer, layout.x_offset, self.align != TextAlign::Left);
+        let mut painter = TextDrawer::new(drawer, layout.x_offset, self.align != TextAlign::Left);
         for line in &layout.lines {
             // Trimming can remove every span of a blank/whitespace-only row.
             // It still occupies a measured row: advancing only inside the
             // span loop shifts every later paragraph and scroll coordinate.
             if line.segments.is_empty() {
-                drawer.append_lines(["", ""], CanvasTextStyle::default(), None);
+                painter.append_lines(["", ""], CanvasTextStyle::default(), None);
                 continue;
             }
 
             let additional_padding = line.padding - layout.x_offset;
             if additional_padding > 0 {
-                drawer.append_lines(
+                painter.append_lines(
                     [format!("{:width$}", "", width = additional_padding as usize).as_str()],
                     CanvasTextStyle::default(),
                     None,
@@ -308,14 +322,14 @@ impl Component for MixedText {
                     invert: content.invert,
                 };
                 if segments.peek().is_some() {
-                    drawer.append_lines_with_background(
+                    painter.append_lines_with_background(
                         [text],
                         style,
                         content.hyperlink.as_deref(),
                         content.background_color,
                     );
                 } else {
-                    drawer.append_lines_with_background(
+                    painter.append_lines_with_background(
                         [text, ""],
                         style,
                         content.hyperlink.as_deref(),
@@ -324,12 +338,35 @@ impl Component for MixedText {
                 }
             }
         }
+        if cacheable {
+            self.painted = drawer
+                .canvas()
+                .capture_rows()
+                .map(|rows| PaintedRows { width, rows });
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::prelude::*;
+
+    #[test]
+    fn nowrap_alignment_clips_long_rows_without_losing_short_rows() {
+        for align in [TextAlign::Center, TextAlign::Right] {
+            let text = "abcdefghijk\nx";
+            let plain = element! {
+                View(width: 4) { Text(content: text, wrap: TextWrap::NoWrap, align) }
+            }
+            .render(None);
+            let mixed = element! {
+                View(width: 4) {
+                    MixedText(contents: vec![MixedTextContent::new(text)], wrap: TextWrap::NoWrap, align)
+                }
+            }.render(None);
+            assert_eq!(mixed.get_text(0, 0, 4, 2), plain.get_text(0, 0, 4, 2));
+        }
+    }
 
     #[test]
     fn mixed_text_keeps_blank_rows_in_the_measured_coordinate_space() {
