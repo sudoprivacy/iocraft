@@ -11,6 +11,8 @@ const { Terminal } = fromHost('@xterm/headless');
 const { Unicode11Addon } = fromHost('@xterm/addon-unicode11');
 const [fixture, backend = 'bundled'] = process.argv.slice(2);
 assert(fixture && ['bundled', 'system'].includes(backend));
+const mode = process.env.IOCRAFT_UNICODE_HISTORY_MODE;
+assert(['handoff', 'fallback'].includes(mode));
 const terminal = new Terminal({ cols: 120, rows: 40, scrollback: 10000, allowProposedApi: true,
   windowsPty: process.platform === 'win32'
     ? { backend: 'conpty', buildNumber: Number(os.release().split('.')[2]) } : undefined });
@@ -50,22 +52,24 @@ async function expect(condition, description) {
   throw new Error(`${description}\n${rows().join('\n')}`);
 }
 async function input(text) {
-  await expect(lines => lines.some(line => line.startsWith(`❯ ${text}`)),
+  await expect(lines => lines.some((line, i) => line === `❯ ${text}`.trimEnd()
+    && lines[i - 1] === '─'.repeat(120) && lines[i + 1] === '─'.repeat(120)),
     `input must remain on its prompt row: ${text}`);
 }
 (async () => {
   try {
     await expect(lines => lines.includes('UnicodeFooter p0 120x40'), 'initial frame');
-    child.write('DraftBefore');
-    await input('DraftBefore');
+    const before = mode === 'handoff' ? 'DraftBefore' : '';
+    if (before) child.write(before);
+    await input(before);
     child.write('\x1bOP');
     await expect(lines => lines.includes('UnicodeFooter p1 120x40'), 'live preview frame');
-    await input('DraftBefore');
+    await input(before);
     child.write('\x1bOQ');
     await expect(lines => lines.includes('UnicodeFooter p2 120x40'), 'history handoff frame');
-    await input('DraftBefore');
+    await input(before);
     child.write('-After');
-    await input('DraftBefore-After');
+    await input(`${before}-After`);
     child.write('\x1b');
     for (let i = 0; i < 250; i++) {
       if (exitCode === undefined && process.platform === 'win32') exitCode = child._agent?.exitCode;
@@ -73,7 +77,7 @@ async function input(text) {
       await sleep(20);
     }
     assert(exited && exitCode === 0, `normal exit required: ${exitCode}`);
-    console.log(JSON.stringify({ backend, case: process.env.IOCRAFT_UNICODE_HISTORY_CASE,
+    console.log(JSON.stringify({ backend, mode, case: process.env.IOCRAFT_UNICODE_HISTORY_CASE,
       trace: Boolean(process.env.IOCRAFT_FRAME_WRITE_TRACE), inputOwnership: true, exitCode }));
   } finally {
     if (!exited) {

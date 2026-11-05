@@ -21,6 +21,7 @@ fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut value = hooks.use_state(String::new);
     let mut done = hooks.use_state(|| false);
     let mut system = hooks.use_context_mut::<SystemContext>();
+    let handoff = std::env::var("IOCRAFT_UNICODE_HISTORY_MODE").as_deref() == Ok("handoff");
     hooks.use_terminal_events(move |event| {
         if let TerminalEvent::Key(KeyEvent {
             code,
@@ -30,11 +31,15 @@ fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         {
             match code {
                 KeyCode::F(1) => {
-                    history.print(format!("❯ {}\n\n", "submitted prompt ".repeat(10)));
+                    history.println(format!("❯ {}", "submitted prompt ".repeat(10)));
+                    history.println("");
                     phase.set(1);
                 }
                 KeyCode::F(2) => {
-                    history.print(format!("{}\n\n[fixture-model] turn 1\n\n", document()));
+                    history.println(document());
+                    history.println("");
+                    history.println("[fixture-model] turn 1");
+                    history.println("");
                     phase.set(2);
                 }
                 KeyCode::Esc => done.set(true),
@@ -45,22 +50,31 @@ fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     if done.get() {
         system.exit();
     }
-    let preview = phase.get() == 1;
+    let working = phase.get() == 1;
+    let preview = working && handoff;
+    let live_rows = 4_u32 + u32::from(preview) + if working { 2 } else { 0 };
     element! {
-        View(width: u32::from(width), flex_direction: FlexDirection::Column) {
-            View(height: if preview { 1 } else { 0 }, flex_direction: FlexDirection::Column) {
+        View(width: u32::from(width), height: live_rows, flex_direction: FlexDirection::Column) {
+            View(height: if preview { 1 } else { 0 }, flex_shrink: 0.0, flex_direction: FlexDirection::Column) {
                 #(preview.then(|| element! { Text(content: "• ProseStart 中", wrap: TextWrap::NoWrap) }))
             }
-            View(height: if preview { 2 } else { 0 }) {
-                #(preview.then(|| element! { Text(content: "Working...") }))
+            View(height: if working { 2 } else { 0 }, flex_shrink: 0.0) {
+                #(working.then(|| element! { Text(content: "Working...") }))
             }
-            Text(content: "─".repeat(usize::from(width)), wrap: TextWrap::NoWrap)
-            View(flex_direction: FlexDirection::Row, height: 1) {
-                Text(content: "❯ ")
-                TextInput(value: value.to_string(), has_focus: true, on_change: move |text| value.set(text))
+            View(height: 1, flex_shrink: 0.0) {
+                Text(content: "─".repeat(usize::from(width)), wrap: TextWrap::NoWrap)
             }
-            Text(content: "─".repeat(usize::from(width)), wrap: TextWrap::NoWrap)
-            Text(content: format!("UnicodeFooter p{} {width}x{height}", phase.get()))
+            View(flex_direction: FlexDirection::Row, width: 100pct, height: 1, flex_shrink: 0.0) {
+                View(width: 2, flex_shrink: 0.0) { Text(content: "❯ ") }
+                TextInput(value: value.to_string(), has_focus: true, multiline: true,
+                    on_change: move |text| value.set(text))
+            }
+            View(height: 1, flex_shrink: 0.0) {
+                Text(content: "─".repeat(usize::from(width)), wrap: TextWrap::NoWrap)
+            }
+            View(height: 1, flex_shrink: 0.0) {
+                Text(content: format!("UnicodeFooter p{} {width}x{height}", phase.get()))
+            }
         }
     }
 }
