@@ -1,0 +1,52 @@
+name: SudoCode prose diagnosis
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  original-cli:
+    name: Original Windows CLI prose journeys (diagnostic only)
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      SCODE_TEST_BACKEND: mock
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: renderer
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: sudoprivacy/sudocode
+          ref: dd1efe4ad41afa1bad4a052b6b46b6648c7e268e
+          path: scode
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: scode/rust -> target
+          shared-key: original-sudocode-prose-diagnostic
+          cache-on-failure: true
+      - name: Install the original source's protobuf compiler
+        run: python scode/.github/scripts/setup_protoc.py
+      - name: Retain the original product and input-ownership assertions
+        run: >-
+          python renderer/packages/iocraft/tests/diagnose_sudocode_prose.py
+          scode renderer "${{ runner.temp }}/original-sudocode-prose"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: original-sudocode-prose-windows
+          path: ${{ runner.temp }}/original-sudocode-prose
+          if-no-files-found: error

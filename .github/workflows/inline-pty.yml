@@ -28,6 +28,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - name: Build the real terminal fixture
         run: cargo build -p iocraft --example inline_history_fixture --example input_ownership_fixture --example unicode_history_fixture
       - name: Cache the pinned terminal host
@@ -131,11 +134,10 @@ jobs:
           $unicodeApp = Join-Path $unicodeTerminal "$($env:VSCODE_COMMIT.Substring(0, 10))/resources/app"
           $unicodeLogs = Join-Path $env:RUNNER_TEMP 'inline-pty-logs/unicode-history'
           New-Item -ItemType Directory -Force $unicodeLogs | Out-Null
-          $env:ELECTRON_RUN_AS_NODE = '1'
           $env:IOCRAFT_TERMINAL_MODULES = Join-Path $unicodeApp 'node_modules.asar'
-          & (Join-Path $unicodeTerminal 'Code.exe') `
-            ./packages/iocraft/tests/run_unicode_history_pty.cjs `
-            ./target/debug/examples/unicode_history_fixture.exe $unicodeLogs
+          $env:IOCRAFT_TEST_NODE = Join-Path $unicodeTerminal 'Code.exe'
+          Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
+          node ./packages/iocraft/tests/run_unicode_history_pty.cjs ./target/debug/examples/unicode_history_fixture.exe $unicodeLogs
           if ($LASTEXITCODE -ne 0) { throw 'Native Unicode diagnostic failed; inspect the retained case logs' }
       - name: Retain terminal output and wire traces
         if: always()

@@ -16,13 +16,15 @@ for (const backend of process.platform === 'win32' ? ['bundled', 'system'] : ['b
         const prefix = path.resolve(directory, label);
         const env = { ...process.env, IOCRAFT_UNICODE_HISTORY_CASE: document,
           IOCRAFT_UNICODE_HISTORY_MODE: mode, IOCRAFT_WIRE_TRACE: `${prefix}-wire.jsonl` };
+        if (process.platform === 'win32') env.ELECTRON_RUN_AS_NODE = '1';
         delete env.IOCRAFT_FRAME_WRITE_TRACE;
         if (traced) env.IOCRAFT_FRAME_WRITE_TRACE = `${prefix}-application.log`;
         const stdout = fs.openSync(`${prefix}.stdout.log`, 'wx');
         const stderr = fs.openSync(`${prefix}.stderr.log`, 'wx');
         let result;
         try {
-          result = spawnSync(process.execPath, [path.join(__dirname, 'unicode_history_pty.cjs'),
+          result = spawnSync(process.env.IOCRAFT_TEST_NODE || process.execPath,
+            [path.join(__dirname, 'unicode_history_pty.cjs'),
             path.resolve(fixture), backend], { env, stdio: ['ignore', stdout, stderr] });
         } finally {
           fs.closeSync(stdout);

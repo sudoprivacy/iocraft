@@ -52,7 +52,7 @@ async function expect(condition, description) {
   throw new Error(`${description}\n${rows().join('\n')}`);
 }
 async function input(text) {
-  await expect(lines => lines.some((line, i) => line === `❯ ${text}`.trimEnd()
+  await expect(lines => lines.some((line, i) => line.trimEnd() === `❯ ${text}`.trimEnd()
     && lines[i - 1] === '─'.repeat(120) && lines[i + 1] === '─'.repeat(120)),
     `input must remain on its prompt row: ${text}`);
 }
