@@ -29,7 +29,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build the real terminal fixture
-        run: cargo build -p iocraft --example inline_history_fixture --example input_ownership_fixture
+        run: cargo build -p iocraft --example inline_history_fixture --example input_ownership_fixture --example unicode_history_fixture
       - name: Cache the pinned terminal host
         id: terminal-cache
         uses: actions/cache@v4
@@ -123,6 +123,43 @@ jobs:
             -FixturePath './target/debug/examples/inline_history_fixture.exe' `
             -LogDirectory (Join-Path $env:RUNNER_TEMP 'inline-pty-logs/row-shift') `
             -Scenario row-shift
+      - name: Diagnose Unicode history and input ownership on both ConPTY backends
+        if: always()
+        shell: pwsh
+        run: |
+          $unicodeTerminal = Join-Path $env:RUNNER_TEMP 'inline-pty-vscode'
+          $unicodeApp = Join-Path $unicodeTerminal "$($env:VSCODE_COMMIT.Substring(0, 10))/resources/app"
+          $unicodeLogs = Join-Path $env:RUNNER_TEMP 'inline-pty-logs/unicode-history'
+          New-Item -ItemType Directory -Force $unicodeLogs | Out-Null
+          $env:ELECTRON_RUN_AS_NODE = '1'
+          $env:IOCRAFT_TERMINAL_MODULES = Join-Path $unicodeApp 'node_modules.asar'
+          $unicodeFailures = @()
+          foreach ($unicodeBackend in @('bundled', 'system')) {
+            foreach ($unicodeCase in @('ascii', 'combining', 'laptop')) {
+              foreach ($unicodeTracing in @('untraced', 'traced')) {
+                $unicodeLabel = "$unicodeBackend-$unicodeCase-$unicodeTracing"
+                $env:IOCRAFT_UNICODE_HISTORY_CASE = $unicodeCase
+                $env:IOCRAFT_WIRE_TRACE = Join-Path $unicodeLogs "$unicodeLabel-wire.jsonl"
+                if ($unicodeTracing -eq 'traced') {
+                  $env:IOCRAFT_FRAME_WRITE_TRACE = Join-Path $unicodeLogs "$unicodeLabel-application.log"
+                } else {
+                  Remove-Item Env:IOCRAFT_FRAME_WRITE_TRACE -ErrorAction SilentlyContinue
+                }
+                $unicodePreference = $ErrorActionPreference
+                $ErrorActionPreference = 'Continue'
+                & (Join-Path $unicodeTerminal 'Code.exe') `
+                  ./packages/iocraft/tests/unicode_history_pty.cjs `
+                  ./target/debug/examples/unicode_history_fixture.exe $unicodeBackend `
+                  2> (Join-Path $unicodeLogs "$unicodeLabel.stderr.log") `
+                  | Tee-Object -FilePath (Join-Path $unicodeLogs "$unicodeLabel.stdout.log")
+                $unicodeExit = $LASTEXITCODE
+                $ErrorActionPreference = $unicodePreference
+                Get-Content -LiteralPath (Join-Path $unicodeLogs "$unicodeLabel.stderr.log") -Encoding utf8
+                if ($unicodeExit -ne 0) { $unicodeFailures += "$unicodeLabel ($unicodeExit)" }
+              }
+            }
+          }
+          if ($unicodeFailures.Count) { throw "Unicode input ownership failures: $($unicodeFailures -join ', ')" }
       - name: Retain terminal output and wire traces
         if: always()
         uses: actions/upload-artifact@v4
@@ -149,7 +186,7 @@ jobs:
       - name: Install the same terminal model as the Windows host
         run: npm ci --prefix packages/iocraft/tests/terminal-host
       - name: Build the real terminal fixture
-        run: cargo build -p iocraft --example inline_history_fixture --example input_ownership_fixture
+        run: cargo build -p iocraft --example inline_history_fixture --example input_ownership_fixture --example unicode_history_fixture
       - name: Check complete history and live frame ownership
         run: |
           mkdir -p "$RUNNER_TEMP/inline-pty-logs"
@@ -193,6 +230,28 @@ jobs:
             node packages/iocraft/tests/inline_history_pty.cjs \
             target/debug/examples/inline_history_fixture bundled row-shift \
             > "$RUNNER_TEMP/inline-pty-logs/row-shift.log" 2>&1
+      - name: Diagnose Unicode history and input ownership on the native Unix PTY
+        if: always()
+        run: |
+          export IOCRAFT_TERMINAL_MODULES="$GITHUB_WORKSPACE/packages/iocraft/tests/terminal-host/node_modules"
+          mkdir -p "$RUNNER_TEMP/inline-pty-logs/unicode-history"
+          unicode_failed=0
+          for unicode_case in ascii combining laptop; do
+            for unicode_tracing in untraced traced; do
+              export IOCRAFT_UNICODE_HISTORY_CASE="$unicode_case"
+              export IOCRAFT_WIRE_TRACE="$RUNNER_TEMP/inline-pty-logs/unicode-history/$unicode_case-$unicode_tracing-wire.jsonl"
+              if [ "$unicode_tracing" = traced ]; then
+                export IOCRAFT_FRAME_WRITE_TRACE="$RUNNER_TEMP/inline-pty-logs/unicode-history/$unicode_case-$unicode_tracing-application.log"
+              else
+                unset IOCRAFT_FRAME_WRITE_TRACE
+              fi
+              if ! node packages/iocraft/tests/unicode_history_pty.cjs target/debug/examples/unicode_history_fixture bundled \
+                > "$RUNNER_TEMP/inline-pty-logs/unicode-history/$unicode_case-$unicode_tracing.log" 2>&1; then
+                unicode_failed=1
+              fi
+            done
+          done
+          exit "$unicode_failed"
       - name: Retain terminal output and wire traces
         if: always()
         uses: actions/upload-artifact@v4
