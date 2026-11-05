@@ -85,4 +85,4 @@ async function input(text) {
     if (process.env.IOCRAFT_WIRE_TRACE)
       fs.writeFileSync(process.env.IOCRAFT_WIRE_TRACE, wire.map(row => JSON.stringify(row)).join('\n') + '\n');
   }
-})().catch(error => { console.error(error); process.exitCode = 1; });
+})().then(() => process.exit(0)).catch(error => { console.error(error); process.exit(1); });
