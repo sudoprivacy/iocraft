@@ -40,10 +40,19 @@ jobs:
           cache-on-failure: true
       - name: Install the original source's protobuf compiler
         run: python scode/.github/scripts/setup_protoc.py
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/original-pinned-terminal
+          key: original-sudocode-terminal-07f806f999227108933c2e30515b26eecc1fda74
+      - name: Reuse the original source's checksum-pinned terminal installer
+        run: python scode/e2e/terminal-resize/setup_windows.py "${{ runner.temp }}/original-pinned-terminal"
+      - name: Install the read-only owned-process observer
+        run: python -m pip install psutil
       - name: Retain the original product and input-ownership assertions
         run: >-
           python renderer/packages/iocraft/tests/diagnose_sudocode_prose.py
           scode renderer "${{ runner.temp }}/original-sudocode-prose"
+          "${{ runner.temp }}/original-pinned-terminal"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
