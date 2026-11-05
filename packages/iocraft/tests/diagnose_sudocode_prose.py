@@ -51,28 +51,34 @@ def main():
         for case in ["ambiguous_grapheme_width_uses_complete_block_fallback",
                      "live_prose_is_visible_and_input_remains_usable"]:
             for traced in [False, True]:
-                label = f"{case}-{'traced' if traced else 'untraced'}"
-                environment = {**os.environ, "SCODE_TEST_BACKEND": "mock"}
-                environment.pop("IOCRAFT_FRAME_WRITE_TRACE", None)
-                if traced:
-                    environment["IOCRAFT_FRAME_WRITE_TRACE"] = str(output / f"{label}-application.log")
-                invocation = [tests[0], case, "--exact", "--nocapture", "--test-threads=1"]
-                with (output / f"{label}.stdout.log").open("wb") as stdout, \
-                        (output / f"{label}.stderr.log").open("wb") as stderr:
-                    result = subprocess.run(invocation, cwd=source / "rust", env=environment,
-                                            stdout=stdout, stderr=stderr)
-                entry = {"case": case, "traced": traced, "command": invocation, "exit": result.returncode}
-                if traced:
-                    trace = output / f"{label}-application.log"
-                    entry["application_trace_bytes"] = trace.stat().st_size if trace.exists() else 0
-                report["cases"].append(entry)
-                print(json.dumps(entry), flush=True)
+                for delayed in [False, True]:
+                    label = f"{case}-{'traced' if traced else 'untraced'}"
+                    label += "-delayed" if delayed else "-inherited"
+                    environment = {**os.environ, "SCODE_TEST_BACKEND": "mock"}
+                    environment.pop("IOCRAFT_DIAG_DELAYED_WRAP", None)
+                    if delayed:
+                        environment["IOCRAFT_DIAG_DELAYED_WRAP"] = "1"
+                    environment.pop("IOCRAFT_FRAME_WRITE_TRACE", None)
+                    if traced:
+                        environment["IOCRAFT_FRAME_WRITE_TRACE"] = str(output / f"{label}-application.log")
+                    invocation = [tests[0], case, "--exact", "--nocapture", "--test-threads=1"]
+                    with (output / f"{label}.stdout.log").open("wb") as stdout, \
+                            (output / f"{label}.stderr.log").open("wb") as stderr:
+                        result = subprocess.run(invocation, cwd=source / "rust", env=environment,
+                                                stdout=stdout, stderr=stderr)
+                    entry = {"case": case, "traced": traced, "delayed_wrap": delayed,
+                             "command": invocation, "exit": result.returncode}
+                    if traced:
+                        trace = output / f"{label}-application.log"
+                        entry["application_trace_bytes"] = trace.stat().st_size if trace.exists() else 0
+                    report["cases"].append(entry)
+                    print(json.dumps(entry), flush=True)
     finally:
         changed = subprocess.check_output(["git", "diff", "--name-only"], cwd=source, text=True).splitlines()
         report["changed_source_paths"] = changed
         (output / "result.json").write_text(json.dumps(report, indent=2) + "\n")
         assert set(changed) <= {"rust/Cargo.lock"}, "Do not alter the original product or assertions"
-    assert len(report["cases"]) == 4 and all(entry["exit"] == 0 for entry in report["cases"]), \
+    assert len(report["cases"]) == 8 and all(entry["exit"] == 0 for entry in report["cases"]), \
         "Original CLI journeys failed; retain and inspect their application/wire traces"
     assert all(entry.get("application_trace_bytes", 1) > 0 for entry in report["cases"]), \
         "A traced case did not produce application bytes; no diagnostic conclusion is valid"
