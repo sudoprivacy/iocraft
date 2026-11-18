@@ -468,6 +468,9 @@ impl<'a> Tree<'a> {
             .expect("we should be able to get the wrapper layout");
         let width = wrapper_layout.size.width as usize;
         let height = wrapper_layout.size.height as usize;
+        let at_terminal_edge = terminal_size
+            .0
+            .is_some_and(|(columns, _)| usize::from(columns) == width);
         let mut canvas = match terminal.and_then(Terminal::take_render_buffer) {
             Some(mut canvas) => {
                 canvas.clear_and_resize(width, height);
@@ -475,6 +478,7 @@ impl<'a> Tree<'a> {
             }
             None => Canvas::new(width, height),
         };
+        canvas.set_at_terminal_edge(at_terminal_edge);
         let root_layout = self
             .layout_engine
             .layout(self.root_component.node_id())
