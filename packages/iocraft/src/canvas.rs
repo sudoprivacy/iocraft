@@ -108,6 +108,28 @@ impl CanvasTextStyle {
     }
 }
 
+/// Where a row's tail of cells holding only one background colour begins, and
+/// that colour, when the tail reaches the canvas edge and that edge is the
+/// terminal's (`Canvas::at_terminal_edge`). Such a tail is
+/// painted with EL rather than written as spaces: written spaces are text to a
+/// terminal and wrap when it narrows, while erased cells keep the colour and
+/// never wrap. Writing and reflow prediction both follow this rule.
+fn erased_tail(row: &[CanvasCell], canvas: &Canvas) -> Option<(usize, Color)> {
+    if !canvas.at_terminal_edge || row.len() != canvas.width {
+        return None;
+    }
+    let color = row.last()?.background_color?;
+    let start = row
+        .iter()
+        .rposition(|cell| {
+            cell.character.is_some()
+                || cell.hyperlink.is_some()
+                || cell.background_color != Some(color)
+        })
+        .map_or(0, |index| index + 1);
+    Some((start, color))
+}
+
 /// A single cell on a [`Canvas`], containing optional text and background color.
 #[non_exhaustive]
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -148,6 +170,11 @@ pub struct Canvas {
     width: usize,
     cells: Vec<CanvasRow>,
     empty_row: Arc<Vec<CanvasCell>>,
+    /// The right edge is the terminal's own edge (a live frame exactly as
+    /// wide as the terminal), so a shaded tail may be erased in its
+    /// background rather than written; see [`erased_tail`]. Elsewhere the
+    /// terminal may be wider, and EL would paint past the canvas.
+    at_terminal_edge: bool,
 }
 
 #[derive(Clone)]
@@ -182,7 +209,10 @@ impl PartialEq for CanvasRow {
 
 impl PartialEq for Canvas {
     fn eq(&self, other: &Self) -> bool {
-        self.width == other.width && self.cells == other.cells
+        // The edge flag changes how an identical row is written.
+        self.width == other.width
+            && self.at_terminal_edge == other.at_terminal_edge
+            && self.cells == other.cells
     }
 }
 
@@ -200,9 +230,14 @@ impl Canvas {
             width,
             cells: Vec::new(),
             empty_row: Arc::new(Vec::new()),
+            at_terminal_edge: false,
         };
         canvas.clear_and_resize(width, height);
         canvas
+    }
+
+    pub(crate) fn set_at_terminal_edge(&mut self, at_terminal_edge: bool) {
+        self.at_terminal_edge = at_terminal_edge;
     }
 
     pub(crate) fn clear_and_resize(&mut self, width: usize, height: usize) {
@@ -382,8 +417,9 @@ impl Canvas {
         (0..height.min(self.height()))
             .map(|y| {
                 let row = self.row(y).unwrap_or(&[]);
+                let end = erased_tail(row, self).map_or(row.len(), |(start, _)| start);
                 let (mut source, mut column, mut rows) = (0, 0, 1);
-                while source < row.len() {
+                while source < end {
                     let width = row[source]
                         .character
                         .as_ref()
@@ -444,7 +480,24 @@ impl Canvas {
         let mut text_style = CanvasTextStyle::default();
         let mut col = range.start;
         let mut did_clear_line = false;
+        let erased = (ansi && clear_tail)
+            .then(|| erased_tail(&row[..range.end], self))
+            .flatten();
         while col < range.end {
+            if let Some((_, color)) = erased.filter(|&(start, _)| col >= start) {
+                if hyperlink.is_some() {
+                    write!(w, "\x1b]8;;\x1b\\")?;
+                    hyperlink = None;
+                }
+                write!(
+                    w,
+                    concat!(csi!("0m"), csi!("{}m"), csi!("K")),
+                    Colored::BackgroundColor(color)
+                )?;
+                background_color = Some(color);
+                did_clear_line = true;
+                break;
+            }
             let cell = &row[col];
 
             if ansi {
@@ -1244,6 +1297,69 @@ mod tests {
         write!(expected, "\r\n").unwrap();
 
         assert_eq!(actual, expected);
+    }
+
+    /// A live frame as wide as the terminal erases its shaded tail with EL in
+    /// the background colour instead of writing spaces, which a terminal would
+    /// treat as text and wrap when it narrows. Elsewhere spaces remain.
+    #[test]
+    fn shaded_tail_at_the_terminal_edge_is_erased() {
+        let shaded = |at_terminal_edge: bool| {
+            let mut canvas = Canvas::new(12, 1);
+            canvas.set_at_terminal_edge(at_terminal_edge);
+            let mut view = canvas.subview_mut(0, 0, 0, 0, 12, 1);
+            view.set_background_color(0, 0, 12, 1, Color::Red);
+            view.set_text(0, 0, "ab", CanvasTextStyle::default());
+            let mut row = Vec::new();
+            canvas.write_ansi_row_without_newline(0, &mut row).unwrap();
+            String::from_utf8(row).unwrap()
+        };
+        let red = format!(csi!("{}m"), Colored::BackgroundColor(Color::Red));
+        let erased = shaded(true);
+        assert!(erased.contains("ab"), "{erased:?}");
+        assert!(
+            erased.contains(&format!("{red}{}", csi!("K"))),
+            "the tail is erased in its colour: {erased:?}"
+        );
+        assert!(!erased.contains("  "), "no padding spaces: {erased:?}");
+        assert!(
+            erased.ends_with(&format!(
+                "{}{}",
+                format_args!(csi!("{}m"), Colored::BackgroundColor(Color::Reset)),
+                csi!("0m")
+            )),
+            "the background is reset before the row ends: {erased:?}"
+        );
+        // Elsewhere the spaces stay, and the background is reset before any
+        // EL so it cannot spread past the canvas (#142).
+        let padded = shaded(false);
+        assert!(padded.contains("ab   "), "spaces remain: {padded:?}");
+        assert!(
+            padded.contains(&format!(
+                "{}{}",
+                format_args!(csi!("{}m"), Colored::BackgroundColor(Color::Reset)),
+                csi!("K")
+            )),
+            "EL runs without the background: {padded:?}"
+        );
+    }
+
+    /// Resize recovery predicts each row's reflowed height from the cells the
+    /// terminal holds as text, so an erased tail does not count.
+    #[test]
+    fn reflow_prediction_skips_an_erased_tail() {
+        let height = |at_terminal_edge: bool| {
+            let mut canvas = Canvas::new(12, 2);
+            canvas.set_at_terminal_edge(at_terminal_edge);
+            let mut view = canvas.subview_mut(0, 0, 0, 0, 12, 2);
+            view.set_background_color(0, 0, 12, 2, Color::Red);
+            view.set_text(0, 0, "abcdef", CanvasTextStyle::default());
+            canvas.reflowed_height(4)
+        };
+        // "abcdef" needs 2 rows at 4 columns and the blank shaded row 1.
+        assert_eq!(height(true), 3);
+        // Written spaces wrap: 12 cells are 3 rows each.
+        assert_eq!(height(false), 6);
     }
 
     #[test]
