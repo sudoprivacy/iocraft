@@ -7,7 +7,7 @@ const fromHost = name => require(path.join(process.env.IOCRAFT_TERMINAL_MODULES,
 const { Terminal } = fromHost('@xterm/headless');
 const pty = fromHost('node-pty');
 const [fixture, mode, scenario] = process.argv.slice(2);
-assert(fixture && ['bundled', 'system'].includes(mode) && ['clear', 'paste', 'middle-paste', 'clear-paste', 'navigation', 'rendered-cursor', 'resize-boundary', 'resize-restore-boundary', 'resize-narrow-burst', 'resize-pending-burst', 'resize-pending-restore', 'resize-visible-burst', 'resize-pending-visible'].includes(scenario));
+assert(fixture && ['bundled', 'system'].includes(mode) && ['clear', 'paste', 'middle-paste', 'clear-paste', 'navigation', 'rendered-cursor', 'resize-boundary', 'resize-restore-boundary', 'resize-narrow-burst', 'resize-narrow-paste-burst', 'resize-narrow-paste-ack', 'resize-pending-burst', 'resize-pending-restore', 'resize-visible-burst', 'resize-pending-visible'].includes(scenario));
 const terminal = new Terminal({ cols: 100, rows: 30, scrollback: 1000, allowProposedApi: true,
   ...(process.platform === 'win32' ? { reflowCursorLine: mode !== 'system',
     windowsPty: { backend: 'conpty', buildNumber: Number(os.release().split('.')[2]) } } : {}) });
@@ -19,6 +19,11 @@ const child = pty.spawn(path.resolve(fixture), [], { cols: 100, rows: 30,
 let pending = 0, lastData = Date.now(), exited = false, exitCode;
 const visibleScenario = scenario === 'resize-visible-burst' || scenario === 'resize-pending-visible';
 const pausedScenario = scenario === 'resize-pending-burst' || scenario === 'resize-pending-restore' || scenario === 'resize-pending-visible';
+const pasteScenario = scenario === 'resize-narrow-paste-burst' || scenario === 'resize-narrow-paste-ack';
+function traceDriver(action) {
+  if (process.env.IOCRAFT_WIRE_TRACE)
+    fs.appendFileSync(process.env.IOCRAFT_WIRE_TRACE, JSON.stringify({ time: Date.now(), action }) + '\n');
+}
 let paused = false;
 function ownedIdentity() {
   const stat = fs.readFileSync(`/proc/${child.pid}/stat`, 'utf8');
@@ -94,7 +99,7 @@ async function stop() {
 (async () => {
   try {
     await waitFor('InputValue::EndValue');
-    const narrowBurst = scenario === 'resize-narrow-burst' || pausedScenario || visibleScenario;
+    const narrowBurst = scenario === 'resize-narrow-burst' || pasteScenario || pausedScenario || visibleScenario;
     const seed = narrowBurst ? 'DraftHeadTail' : 'Seed';
     child.write(seed);
     await waitFor(`InputValue:${seed}:EndValue`, !narrowBurst);
@@ -137,6 +142,7 @@ async function stop() {
       }
       terminal.resize(width, 8);
       child.resize(width, 8);
+      traceDriver('shrink');
       if (scenario === 'resize-restore-boundary') await waitFor('Viewport:30x8:blocked');
       if (scenario === 'resize-pending-restore') {
         await waitFor('Focus:off');
@@ -144,22 +150,27 @@ async function stop() {
       }
       // F6 acknowledges delivery. For the restore case do not wait between
       // hidden input and growth: those pre-resize keys still own the old frame.
-      child.write('MustNotAppear' + (pausedScenario
-        ? '\x1b[200~HiddenPaste\x1b[201~\r'
-        : narrow ? '' : '\r\x1b[17~'));
+      child.write(pasteScenario
+        ? '\x1b[200~MustNotAppear\x1b[201~' + (scenario === 'resize-narrow-paste-ack' ? '\x1b[17~' : '')
+        : 'MustNotAppear' + (pausedScenario
+          ? '\x1b[200~HiddenPaste\x1b[201~\r'
+          : narrow ? '' : '\r\x1b[17~'));
+      traceDriver('sent-hidden-burst');
       if (scenario === 'resize-pending-burst') resumeOwned();
       if (narrow && scenario !== 'resize-pending-restore') await waitFor('Focus:off');
+      if (scenario === 'resize-narrow-paste-ack') await waitFor('BatchAck:1');
       if (scenario === 'resize-boundary') {
         await waitFor('Viewport:30x8:blocked');
         await waitFor('BatchAck:1');
       }
       terminal.resize(100, 30);
       child.resize(100, 30);
+      traceDriver('grow');
       resumeOwned();
       // A restored size marker may also exist in scrollback from startup.
       // Require a fresh, non-editing acknowledgment in the actual viewport;
       // the critical resize/input burst above remains unsynchronized.
-      const restoredAck = narrow ? 1 : 2;
+      const restoredAck = narrow && scenario !== 'resize-narrow-paste-ack' ? 1 : 2;
       child.write('\x1b[17~');
       await waitFor('Viewport:100x30:reviewable');
       await waitFor(`BatchAck:${restoredAck}`);
