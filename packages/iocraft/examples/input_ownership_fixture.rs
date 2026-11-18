@@ -15,7 +15,10 @@ fn trace_input_event(event: &TerminalEvent, width: u16, height: u16) {
         let physical = crossterm::terminal::size().ok();
         let _ = writeln!(
             log,
-            "callback={width}x{height} physical={physical:?} event={event:?}"
+            "time={:?} callback={width}x{height} physical={physical:?} event={event:?}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis())
         );
     }
 }
