@@ -1,10 +1,10 @@
+use crate::width::str_columns;
 use crate::{
     render::MeasureFunc, segmented_string::SegmentedString, strip_ansi::strip_ansi,
     CanvasTextStyle, Color, Component, ComponentDrawer, ComponentUpdater, Hooks, Props, Weight,
 };
 use std::sync::Arc;
 use taffy::{AvailableSpace, Size};
-use unicode_width::UnicodeWidthStr;
 
 /// The text wrapping behavior of a [`Text`] component.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
@@ -105,7 +105,7 @@ impl Text {
             let mut max_width = 0;
             let mut num_lines = 0;
             for line in content.lines() {
-                max_width = max_width.max(line.width());
+                max_width = max_width.max(str_columns(line));
                 num_lines += 1;
             }
             Size {
@@ -163,7 +163,7 @@ impl Text {
             _ => {
                 let paddings = content
                     .lines()
-                    .map(|line| Self::alignment_padding(line.width(), align, width))
+                    .map(|line| Self::alignment_padding(str_columns(line), align, width))
                     .collect::<Vec<_>>();
 
                 let x_offset = paddings.iter().copied().min().unwrap_or(0);
@@ -236,7 +236,7 @@ impl<'a, 'b> TextDrawer<'a, 'b> {
                     .position(|c| !c.is_whitespace())
                     .unwrap_or(line.len());
                 let (whitespace, remaining) = line.split_at(to_skip);
-                self.x += whitespace.width() as isize;
+                self.x += str_columns(whitespace) as isize;
                 line = remaining;
                 if !line.is_empty() {
                     self.line_encountered_non_whitespace = true;
@@ -244,7 +244,7 @@ impl<'a, 'b> TextDrawer<'a, 'b> {
             }
             let placed_x = self.x;
             self.drawer.canvas().set_text(placed_x, self.y, line, style);
-            let w = line.width();
+            let w = str_columns(line);
             if let Some(color) = background {
                 self.drawer
                     .canvas()
@@ -264,7 +264,7 @@ impl<'a, 'b> TextDrawer<'a, 'b> {
                 self.x = self.x_offset;
                 self.line_encountered_non_whitespace = false;
             } else {
-                self.x += line.width() as isize;
+                self.x += str_columns(line) as isize;
             }
         }
     }

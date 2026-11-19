@@ -9,7 +9,9 @@ use crate::{
     Size, TerminalEvent, Weight,
 };
 use std::sync::Arc;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+
+use crate::width::{grapheme_columns, str_columns};
 
 /// A handle which can be used for imperative control of a [`TextInput`] component.
 ///
@@ -147,6 +149,24 @@ pub struct TextInputProps {
     pub handle: Option<Ref<TextInputHandle>>,
 }
 
+/// Where the grapheme cluster ending at `offset` starts. The caret moves and
+/// deletes by whole clusters: inside one it would sit between code points the
+/// terminal draws as a single glyph.
+fn previous_grapheme_start(text: &str, offset: usize) -> usize {
+    text[..offset]
+        .grapheme_indices(true)
+        .next_back()
+        .map_or(0, |(start, _)| start)
+}
+
+/// Where the grapheme cluster starting at `offset` ends.
+fn next_grapheme_end(text: &str, offset: usize) -> usize {
+    text[offset..]
+        .graphemes(true)
+        .next()
+        .map_or(text.len(), |grapheme| offset + grapheme.len())
+}
+
 struct TextBufferRow {
     offset: usize,
     len: usize,
@@ -188,7 +208,7 @@ impl TextBuffer {
             if offset >= row.offset {
                 let offset_in_row = offset - row.offset;
                 if offset_in_row <= row.len {
-                    let col = self.text[row.offset..offset].width() as u16;
+                    let col = str_columns(&self.text[row.offset..offset]) as u16;
                     return (i as _, col);
                 }
             }
@@ -208,25 +228,11 @@ impl TextBuffer {
     }
 
     fn left_of_offset(&self, offset: usize) -> usize {
-        if offset == 0 {
-            0
-        } else {
-            self.text[..offset]
-                .char_indices()
-                .last()
-                .map_or(0, |(i, _)| i)
-        }
+        previous_grapheme_start(&self.text, offset)
     }
 
     fn right_of_offset(&self, offset: usize) -> usize {
-        if offset >= self.text.len() {
-            self.text.len()
-        } else {
-            self.text[offset..]
-                .char_indices()
-                .nth(1)
-                .map_or(self.text.len(), |(i, _)| offset + i)
-        }
+        next_grapheme_end(&self.text, offset.min(self.text.len()))
     }
 
     fn offset_for_closest_column_in_row(&self, row: u16, col: u16) -> usize {
@@ -236,11 +242,11 @@ impl TextBuffer {
             row.offset + row.len
         } else {
             let mut width = 0;
-            for (idx, c) in self.text[row.offset..].char_indices() {
+            for (idx, grapheme) in self.text[row.offset..].grapheme_indices(true) {
                 if width >= col {
                     return row.offset + idx;
                 }
-                width += c.width().unwrap_or(0);
+                width += grapheme_columns(grapheme);
             }
             row.offset + row.len
         }
@@ -503,7 +509,7 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
         }
 
         // Scroll back when the content shrinks so it isn't cut off.
-        let content_width = props.value.width() as u16;
+        let content_width = str_columns(&props.value) as u16;
         let max_scroll_offset_col = (content_width + 1).saturating_sub(width);
         if scroll_offset_col.get() > max_scroll_offset_col {
             scroll_offset_col.set(max_scroll_offset_col);
@@ -607,16 +613,17 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
                         }
                         KeyCode::Backspace => {
                             if event_cursor > 0 {
-                                event_cursor -=
-                                    value[..event_cursor].chars().last().unwrap().len_utf8();
-                                value.remove(event_cursor);
+                                let start = previous_grapheme_start(&value, event_cursor);
+                                value.replace_range(start..event_cursor, "");
+                                event_cursor = start;
                             }
                             text_changed = true;
                             new_cursor_offset_hint.set(NewCursorOffsetHint::Backspace);
                         }
                         KeyCode::Delete => {
                             if event_cursor < value.len() {
-                                value.remove(event_cursor);
+                                let end = next_grapheme_end(&value, event_cursor);
+                                value.replace_range(event_cursor..end, "");
                             }
                             text_changed = true;
                             new_cursor_offset_hint.set(NewCursorOffsetHint::Deletion);
@@ -1071,6 +1078,89 @@ mod tests {
             },
         )
         .await
+    }
+
+    #[test]
+    fn the_caret_follows_the_terminal_width_and_steps_over_whole_clusters() {
+        use crate::width::{with_grapheme_width, GraphemeWidth};
+        // "ab", a four-code-point cluster of 15 bytes, then "XY".
+        let text = "ab\u{1F469}\u{1F3FD}\u{200D}\u{1F4BB}XY";
+        for (mode, cluster) in [
+            (GraphemeWidth::Clustered, 2),
+            (GraphemeWidth::PerCodePoint, 6),
+        ] {
+            with_grapheme_width(mode, || {
+                let buffer = TextBuffer::new(text, 40);
+                assert_eq!(
+                    buffer.row_column_for_offset(17),
+                    (0, 2 + cluster),
+                    "{mode:?}: on X"
+                );
+                assert_eq!(
+                    buffer.row_column_for_offset(19),
+                    (0, 4 + cluster),
+                    "{mode:?}: at the end"
+                );
+                assert_eq!(
+                    buffer.left_of_offset(17),
+                    2,
+                    "{mode:?}: Left skips the cluster"
+                );
+                assert_eq!(
+                    buffer.right_of_offset(2),
+                    17,
+                    "{mode:?}: Right skips the cluster"
+                );
+                assert_eq!(
+                    buffer.offset_for_closest_column_in_row(0, 3),
+                    17,
+                    "{mode:?}: a column inside the cluster lands after it"
+                );
+            });
+        }
+    }
+
+    #[apply(test!)]
+    async fn backspace_and_delete_remove_a_whole_cluster() {
+        let cluster = ['\u{1F469}', '\u{1F3FD}', '\u{200D}', '\u{1F4BB}'];
+        let keys = |codes: Vec<KeyCode>| {
+            futures::stream::iter(
+                codes
+                    .into_iter()
+                    .map(|code| TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, code)))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let mut typed: Vec<KeyCode> = std::iter::once('a')
+            .chain(cluster)
+            .map(KeyCode::Char)
+            .collect();
+        typed.extend([KeyCode::Backspace, KeyCode::Char('!')]);
+        let backspace = element!(MyComponent)
+            .mock_terminal_render_loop(MockTerminalConfig::with_events(keys(typed)))
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(backspace.last().map(String::as_str), Some(" a! \n"));
+
+        let mut typed: Vec<KeyCode> = std::iter::once('a')
+            .chain(cluster)
+            .chain(['b'])
+            .map(KeyCode::Char)
+            .collect();
+        typed.extend([
+            KeyCode::Left,
+            KeyCode::Left,
+            KeyCode::Delete,
+            KeyCode::End,
+            KeyCode::Char('!'),
+        ]);
+        let delete = element!(MyComponent)
+            .mock_terminal_render_loop(MockTerminalConfig::with_events(keys(typed)))
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(delete.last().map(String::as_str), Some(" ab! \n"));
     }
 
     #[test]

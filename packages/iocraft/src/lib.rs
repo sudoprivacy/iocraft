@@ -118,6 +118,7 @@ mod strip_ansi;
 mod style;
 mod terminal;
 pub(crate) mod unicode_linebreak;
+pub mod width;
 
 mod flattened_exports {
     pub use crate::canvas::*;
@@ -144,6 +145,7 @@ pub use flattened_exports::*;
 /// `taffy` dependency to your `Cargo.toml`.
 pub use taffy;
 
+pub use crossterm::cursor::position_within as query_cursor_position;
 /// Query terminal colors before starting the render loop, retaining keyboard
 /// input in the same event queue used by the loop.
 pub use crossterm::terminal::default_colors as query_terminal_colors;
