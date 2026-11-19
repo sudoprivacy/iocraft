@@ -3,7 +3,9 @@ use core::{
     fmt::{self, Display},
     mem,
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+
+use crate::width::{grapheme_columns, str_columns};
 
 /// A `SegmentedString` is a string consisting of multiple segments, which don't have to be
 /// contiguous.
@@ -66,7 +68,7 @@ pub struct SegmentedStringLineSegment<'a> {
 impl SegmentedStringLineSegment<'_> {
     fn substring(&self, start: usize, end: usize) -> Self {
         let text = &self.text[start..end];
-        let width = text.width();
+        let width = str_columns(text);
         SegmentedStringLineSegment {
             text,
             index: self.index,
@@ -77,7 +79,7 @@ impl SegmentedStringLineSegment<'_> {
 
     fn trim_end(&mut self) {
         self.text = self.text.trim_end();
-        self.width = self.text.width();
+        self.width = str_columns(self.text);
     }
 }
 
@@ -95,7 +97,7 @@ impl<'a> SegmentedString<'a> {
         end: usize,
     ) -> SegmentedStringLineSegment<'_> {
         let text = self.segments[index][offset..end].trim_end_matches('\n');
-        let width = text.width();
+        let width = str_columns(text);
         SegmentedStringLineSegment {
             text,
             index,
@@ -177,13 +179,14 @@ impl<'a> SegmentedString<'a> {
 
             let new_line_segments_width: usize = new_line_segments.iter().map(|s| s.width).sum();
 
-            let trailing_whitespace_width: usize = new_line_segments
-                .iter()
-                .rev()
-                .flat_map(|s| s.text.chars().rev())
-                .take_while(|c| c.is_whitespace())
-                .map(|c| c.width().unwrap_or(0))
-                .sum();
+            let mut trailing_whitespace_width = 0;
+            for segment in new_line_segments.iter().rev() {
+                let words = segment.text.trim_end_matches(char::is_whitespace);
+                trailing_whitespace_width += str_columns(&segment.text[words.len()..]);
+                if !words.is_empty() {
+                    break;
+                }
+            }
 
             if current_line.width + (new_line_segments_width - trailing_whitespace_width) <= width {
                 // Everything fits into the current line
@@ -204,17 +207,19 @@ impl<'a> SegmentedString<'a> {
                         .last()
                         .map(|(i, _)| i)
                         .unwrap_or(segment.text.len());
-                    let trailing_whitespace_width = segment.text[trailing_whitespace_idx..].width();
+                    let trailing_whitespace_width =
+                        str_columns(&segment.text[trailing_whitespace_idx..]);
 
                     if current_line.width + (segment.width - trailing_whitespace_width) > width {
-                        // This segment is too wide, we need to forcefully break it
+                        // This segment is too wide, we need to forcefully break
+                        // it, between grapheme clusters only.
                         let mut w = 0;
                         let mut start_idx = 0;
-                        for (idx, c) in segment.text.char_indices() {
+                        for (idx, grapheme) in segment.text.grapheme_indices(true) {
                             if idx >= trailing_whitespace_idx {
                                 break;
                             }
-                            let char_width = c.width().unwrap_or(0);
+                            let char_width = grapheme_columns(grapheme);
                             if w > 0 && w + char_width > width {
                                 // We have a full line
                                 current_line.push_segment(segment.substring(start_idx, idx));
@@ -281,6 +286,21 @@ impl<'a> FromIterator<&'a str> for SegmentedString<'a> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_forced_break_never_splits_a_grapheme_cluster() {
+        use crate::width::{with_grapheme_width, GraphemeWidth};
+        // Six columns per code point, too wide for three: the cluster stays
+        // whole on its row instead of breaking between its code points.
+        with_grapheme_width(GraphemeWidth::PerCodePoint, || {
+            let text = "\u{1F469}\u{1F3FD}\u{200D}\u{1F4BB}";
+            let segmented = super::SegmentedString::from(text);
+            let lines = segmented.wrap(3);
+            let rows: Vec<String> = lines.iter().map(ToString::to_string).collect();
+            assert_eq!(rows, [text]);
+            assert_eq!(lines[0].width, 6);
+        });
+    }
+
     #[test]
     fn unbounded_lines_preserve_unicode_and_style_boundaries() {
         for parts in [

@@ -10,7 +10,9 @@ use std::{
     ops::{Deref, Range},
     sync::{Arc, Once, OnceLock},
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+
+use crate::width::{grapheme_columns, str_columns};
 
 #[derive(Clone, Debug, PartialEq)]
 struct Character {
@@ -62,10 +64,15 @@ impl Character {
         Self { value, style }
     }
 
+    /// Columns the character covers. A zero-width one still takes a cell.
+    fn columns(&self) -> usize {
+        str_columns(&self.value).max(1)
+    }
+
     fn required_padding(&self) -> usize {
         if self.value.contains('\u{fe0f}') {
             if handles_vs16_incorrectly() {
-                self.value.width() - 1
+                str_columns(&self.value).saturating_sub(1)
             } else {
                 0
             }
@@ -356,25 +363,27 @@ impl Canvas {
         }
     }
 
-    fn set_text_row_chars<I>(&mut self, mut x: usize, y: usize, chars: I, style: CanvasTextStyle)
+    fn set_text_row<'a, I>(&mut self, mut x: usize, y: usize, graphemes: I, style: CanvasTextStyle)
     where
-        I: IntoIterator<Item = char>,
+        I: IntoIterator<Item = &'a str>,
     {
-        // Divide the string up into characters, which may consist of multiple Unicode code points.
+        // Each cell holds one grapheme cluster, as wide as the terminal draws
+        // it (`crate::width`). A zero-width cluster joins the one before it.
         let row = self.cells[y].writable();
         let style = Arc::new(style);
         let mut buf = String::new();
-        for c in chars.into_iter() {
+        for grapheme in graphemes {
             if x >= row.len() {
                 break;
             }
-            let width = c.width().unwrap_or(0);
-            if width > 0 && !buf.is_empty() {
-                row[x].character = Some(Character::new(&buf, Arc::clone(&style)));
-                x += buf.width().max(1);
+            if grapheme_columns(grapheme) > 0 && !buf.is_empty() {
+                let character = Character::new(&buf, Arc::clone(&style));
+                let columns = character.columns();
+                row[x].character = Some(character);
+                x += columns;
                 buf.clear();
             }
-            buf.push(c);
+            buf.push_str(grapheme);
         }
         if !buf.is_empty() && x < row.len() {
             row[x].character = Some(Character::new(&buf, style));
@@ -420,10 +429,7 @@ impl Canvas {
                 let end = erased_tail(row, self).map_or(row.len(), |(start, _)| start);
                 let (mut source, mut column, mut rows) = (0, 0, 1);
                 while source < end {
-                    let width = row[source]
-                        .character
-                        .as_ref()
-                        .map_or(1, |c| c.value.width().max(1));
+                    let width = row[source].character.as_ref().map_or(1, Character::columns);
                     if column > 0 && column + width > columns {
                         rows += 1;
                         column = 0;
@@ -569,7 +575,7 @@ impl Canvas {
             }
 
             if let Some(c) = &cell.character {
-                col += c.value.width().max(1);
+                col += c.columns();
             } else {
                 col += 1;
             }
@@ -672,10 +678,7 @@ impl Canvas {
             for row in [old, current] {
                 let mut column = 0;
                 while column < range.end {
-                    let width = row[column]
-                        .character
-                        .as_ref()
-                        .map_or(1, |ch| ch.value.width().max(1));
+                    let width = row[column].character.as_ref().map_or(1, Character::columns);
                     if column < range.start && range.start < column + width {
                         range.start = column;
                     }
@@ -944,21 +947,21 @@ impl CanvasSubviewMut<'_> {
             if y >= min_y && y <= max_y {
                 let mut skipped_width = 0;
                 let mut taken_width = 0;
-                self.canvas.set_text_row_chars(
+                self.canvas.set_text_row(
                     x as usize,
                     y as usize,
-                    line.chars()
-                        .skip_while(|c| {
+                    line.graphemes(true)
+                        .skip_while(|grapheme| {
                             if skipped_width < to_skip {
-                                skipped_width += c.width().unwrap_or(0) as isize;
+                                skipped_width += grapheme_columns(grapheme) as isize;
                                 true
                             } else {
                                 false
                             }
                         })
-                        .take_while(|c| {
+                        .take_while(|grapheme| {
                             if taken_width < horizontal_space {
-                                taken_width += c.width().unwrap_or(0) as isize;
+                                taken_width += grapheme_columns(grapheme) as isize;
                                 true
                             } else {
                                 false
@@ -1612,6 +1615,31 @@ mod tests {
 
         let actual = canvas.to_string();
         assert_eq!(actual, "\n\n  ne 2\n  ne 3\n\n");
+    }
+
+    #[test]
+    fn a_zwj_cluster_is_placed_as_wide_as_the_terminal_draws_it() {
+        use crate::width::{with_grapheme_width, GraphemeWidth};
+        for (mode, x) in [
+            (GraphemeWidth::Clustered, 4),
+            (GraphemeWidth::PerCodePoint, 8),
+        ] {
+            with_grapheme_width(mode, || {
+                let mut canvas = Canvas::new(12, 1);
+                canvas.subview_mut(0, 0, 0, 0, 12, 1).set_text(
+                    0,
+                    0,
+                    "ab\u{1F469}\u{1F3FD}\u{200D}\u{1F4BB}XY",
+                    CanvasTextStyle::default(),
+                );
+                assert_eq!(canvas.get_text(x, 0, 2, 1), "XY", "{mode:?}");
+                assert_eq!(
+                    canvas.to_string(),
+                    "ab\u{1F469}\u{1F3FD}\u{200D}\u{1F4BB}XY\n",
+                    "{mode:?}: the cluster stays one glyph"
+                );
+            });
+        }
     }
 
     #[test]
