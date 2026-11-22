@@ -14,10 +14,11 @@ $env:IOCRAFT_TERMINAL_MODULES = Join-Path $AppPath 'node_modules.asar'
 New-Item -ItemType Directory -Path $LogDirectory -Force | Out-Null
 $failed = @()
 foreach ($backend in @('bundled', 'system')) {
-    foreach ($scenario in @('clear', 'paste', 'middle-paste', 'clear-paste', 'navigation', 'rendered-cursor', 'resize-boundary', 'resize-restore-boundary', 'resize-narrow-burst', 'resize-narrow-paste-burst', 'resize-narrow-paste-ack', 'resize-visible-burst')) {
+    foreach ($scenario in @('clear', 'paste', 'middle-paste', 'clear-paste', 'navigation', 'rendered-cursor', 'resize-boundary', 'resize-restore-boundary', 'resize-narrow-burst', 'resize-narrow-paste-burst', 'resize-narrow-paste-ack', 'resize-visible-burst', 'resize-queued-paste', 'resize-queued-visible-paste')) {
         $prefix = Join-Path $LogDirectory "$backend-$scenario"
         $env:IOCRAFT_WIRE_TRACE = "$prefix-wire.jsonl"
         $env:IOCRAFT_INPUT_EVENT_TRACE = "$prefix-events.log"
+        $env:IOCRAFT_INPUT_QUEUE_DIAGNOSTIC = "$prefix-gate"
         [System.IO.File]::WriteAllText($env:IOCRAFT_WIRE_TRACE, '')
         $ErrorActionPreference = 'Continue'
         & $CodePath (Join-Path $PSScriptRoot 'input_ownership_pty.cjs') $FixturePath $backend $scenario 2> "$prefix.stderr.log" | Tee-Object -FilePath "$prefix.log"

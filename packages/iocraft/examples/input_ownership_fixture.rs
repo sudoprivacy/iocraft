@@ -1,6 +1,58 @@
 //! Controlled-input diagnostic: parent commands and child edits in one burst.
 use iocraft::prelude::*;
 
+// The driver holds only this fixture's event callback. Observe its real
+// console queue without consuming it, then let the usual render loop resume.
+#[cfg(windows)]
+fn observe_pending_paste_before_restore() {
+    use crossterm_winapi::{Console, Handle};
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    let Some(gate) = std::env::var_os("IOCRAFT_INPUT_QUEUE_DIAGNOSTIC").map(PathBuf::from) else {
+        return;
+    };
+    let console = Console::from(Handle::current_in_handle().unwrap());
+    let before = console.number_of_console_input_events().unwrap();
+    let size = crossterm::terminal::size().unwrap();
+    std::fs::write(
+        gate.join("ready"),
+        format!("{}x{} {before}", size.0, size.1),
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let count = console.number_of_console_input_events().unwrap();
+        if count >= before + 128 {
+            let size = crossterm::terminal::size().unwrap();
+            std::fs::write(
+                gate.join("queued"),
+                format!("{}x{} {count}", size.0, size.1),
+            )
+            .unwrap();
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "paste did not reach the console queue"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    loop {
+        if gate.join("release").is_file() && crossterm::terminal::size().unwrap() == (100, 30) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fixture was not restored and released"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(not(windows))]
+fn observe_pending_paste_before_restore() {}
+
 fn trace_input_event(event: &TerminalEvent, width: u16, height: u16) {
     let Ok(path) = std::env::var("IOCRAFT_INPUT_EVENT_TRACE") else {
         return;
@@ -44,7 +96,12 @@ fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         {
             match code {
                 KeyCode::Esc => exit.set(true),
-                KeyCode::F(6) => acknowledgment.set(acknowledgment.get() + 1),
+                KeyCode::F(6) => {
+                    if acknowledgment.get() == 0 {
+                        observe_pending_paste_before_restore();
+                    }
+                    acknowledgment.set(acknowledgment.get() + 1);
+                }
                 KeyCode::Enter if reviewable && input_frame.is_current() => {
                     confirmed.set(confirmed.get() + 1)
                 }
