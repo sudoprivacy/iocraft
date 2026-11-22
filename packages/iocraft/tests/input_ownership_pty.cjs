@@ -7,13 +7,18 @@ const fromHost = name => require(path.join(process.env.IOCRAFT_TERMINAL_MODULES,
 const { Terminal } = fromHost('@xterm/headless');
 const pty = fromHost('node-pty');
 const [fixture, mode, scenario] = process.argv.slice(2);
-assert(fixture && ['bundled', 'system'].includes(mode) && ['clear', 'paste', 'middle-paste', 'clear-paste', 'navigation', 'rendered-cursor', 'resize-boundary', 'resize-restore-boundary', 'resize-narrow-burst', 'resize-pending-burst', 'resize-pending-restore', 'resize-visible-burst', 'resize-pending-visible'].includes(scenario));
+const queueScenario = scenario === 'resize-queued-paste' || scenario === 'resize-queued-visible-paste';
+assert(fixture && ['bundled', 'system'].includes(mode) && (queueScenario || ['clear', 'paste', 'middle-paste', 'clear-paste', 'navigation', 'rendered-cursor', 'resize-boundary', 'resize-restore-boundary', 'resize-narrow-burst', 'resize-pending-burst', 'resize-pending-restore', 'resize-visible-burst', 'resize-pending-visible'].includes(scenario)));
 const terminal = new Terminal({ cols: 100, rows: 30, scrollback: 1000, allowProposedApi: true,
   ...(process.platform === 'win32' ? { reflowCursorLine: mode !== 'system',
     windowsPty: { backend: 'conpty', buildNumber: Number(os.release().split('.')[2]) } } : {}) });
 const env = { ...process.env, TERM: 'xterm-256color' };
 delete env.ELECTRON_RUN_AS_NODE;
 delete env.NO_COLOR;
+const queueGate = queueScenario ? process.env.IOCRAFT_INPUT_QUEUE_GATE : undefined;
+assert(!queueScenario || (process.platform === 'win32' && queueGate && env.IOCRAFT_INPUT_EVENT_TRACE));
+if (queueGate) fs.mkdirSync(queueGate);
+else delete env.IOCRAFT_INPUT_QUEUE_GATE;
 const child = pty.spawn(path.resolve(fixture), [], { cols: 100, rows: 30,
   cwd: path.dirname(path.resolve(fixture)), env, useConpty: true, useConptyDll: mode === 'bundled' });
 let pending = 0, lastData = Date.now(), exited = false, exitCode;
@@ -81,6 +86,26 @@ async function waitFor(text, settled = true) {
   }
   throw new Error(`missing ${text}\n${screen()}`);
 }
+async function waitForQueuedPaste(expectedSize) {
+  const queuedFile = path.join(queueGate, 'queued');
+  const until = Date.now() + 15000;
+  while (Date.now() < until) {
+    if (fs.existsSync(queuedFile)) {
+      const body = fs.readFileSync(queuedFile, 'utf8');
+      if (/^\d+x\d+ \d+$/.test(body)) {
+        assert.equal(body.split(' ')[0], expectedSize, 'size when the native paste was queued');
+        return;
+      }
+    }
+    assert(!exited, 'fixture exited before queueing the paste');
+    await sleep(20);
+  }
+  throw new Error(`no native queue observation\n${screen()}`);
+}
+function assertDraft(expected, message) {
+  const drafts = [...viewport().matchAll(/InputValue:([^:\r\n]*):EndValue/g)];
+  assert.equal(drafts.at(-1)?.[1], expected, `${message}\n${screen()}`);
+}
 async function stop() {
   if (!exited) child.write('\x1b');
   for (let i = 0; i < 250; i++) {
@@ -94,7 +119,7 @@ async function stop() {
 (async () => {
   try {
     await waitFor('InputValue::EndValue');
-    const narrowBurst = scenario === 'resize-narrow-burst' || pausedScenario || visibleScenario;
+    const narrowBurst = scenario === 'resize-narrow-burst' || pausedScenario || visibleScenario || queueScenario;
     const seed = narrowBurst ? 'DraftHeadTail' : 'Seed';
     child.write(seed);
     await waitFor(`InputValue:${seed}:EndValue`, !narrowBurst);
@@ -105,6 +130,35 @@ async function stop() {
       await waitFor('InputValue:DraftXHeadTail:EndValue', false);
       child.write('\x7f');
       await waitFor('InputValue:DraftHeadTail:EndValue', false);
+    }
+    if (queueScenario) {
+      const visible = scenario === 'resize-queued-visible-paste';
+      const [width, height] = visible ? [94, 24] : [12, 8];
+      const size = `${width}x${height}`;
+      terminal.resize(width, height);
+      child.resize(width, height);
+      await waitFor(visible ? `Viewport:${size}:reviewable` : 'Focus:off');
+      child.write('\x1b[17~');
+      await waitForQueuedPaste(size);
+      terminal.resize(100, 30);
+      child.resize(100, 30);
+      fs.writeFileSync(path.join(queueGate, 'release'), '');
+      child.write('\x1b[17~');
+      await waitFor('BatchAck:2');
+      const observed = fs.readFileSync(env.IOCRAFT_INPUT_EVENT_TRACE, 'utf8');
+      assert(observed.includes('callback=100x30 physical=Some((100, 30)) event=Paste("QueuedPaste")'),
+        'the queued paste must reach the restored callback');
+      const expected = visible ? 'Draft[QueuedPaste]HeadTail' : seed;
+      assertDraft(expected, `${mode}: queued paste admitted to wrong frame`);
+      if (!visible) {
+        child.write('\x1b[200~Kept\x1b[201~\x1b[17~');
+        await waitFor('BatchAck:3');
+        assertDraft('Draft[Kept]HeadTail', 'fresh paste must preserve middle cursor');
+      }
+      console.log(JSON.stringify({ mode, scenario, result: 'PASS' }));
+      await stop();
+      assert.equal(exitCode, 0, 'fixture exit');
+      return;
     }
     if (visibleScenario) {
       if (pausedScenario) {
