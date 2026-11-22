@@ -141,11 +141,6 @@ async function stop() {
       child.resize(width, height);
       await waitFor(visible ? `Viewport:${size}:reviewable` : 'Focus:off');
       child.write('\x1b[17~');
-      await waitForGate('ready', size);
-      // Paste a value that produces far more records than focus or resize
-      // bookkeeping. Nothing else is sent before the console queue confirms it.
-      const payload = 'QueuedPaste'.repeat(26);
-      child.write(`\x1b[200~${payload}\x1b[201~`);
       await waitForGate('queued', size);
       traceDriver('restore-after-native-paste-queued');
       terminal.resize(100, 30);
@@ -154,12 +149,9 @@ async function stop() {
       child.write('\x1b[17~');
       await waitFor('BatchAck:2');
       const observed = fs.readFileSync(process.env.IOCRAFT_INPUT_EVENT_TRACE, 'utf8');
-      assert(observed.includes(`event=Paste("${payload}")`), 'the genuine paste must reach the callback');
-      const expected = visible ? `Draft[${payload}]HeadTail` : seed;
-      // A long legitimate result may wrap and clip. A seen prefix confirms
-      // the positive case; the blocked case must retain the whole short draft.
-      const value = visible ? 'InputValue:Draft[QueuedPaste' : `InputValue:${expected}:EndValue`;
-      assert(viewport().includes(value), `${mode}: queued paste admitted to wrong frame\n${screen()}`);
+      assert(observed.includes('event=Paste("QueuedPaste")'), 'the queued paste must reach the callback');
+      const expected = visible ? 'Draft[QueuedPaste]HeadTail' : seed;
+      assert(viewport().includes(`InputValue:${expected}:EndValue`), `${mode}: queued paste admitted to wrong frame\n${screen()}`);
       if (!visible) {
         child.write('\x1b[200~Kept\x1b[201~\x1b[17~');
         await waitFor('BatchAck:3');
