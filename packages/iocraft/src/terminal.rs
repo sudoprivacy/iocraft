@@ -1074,12 +1074,18 @@ impl<'a> Terminal<'a> {
     pub fn suspend(&mut self, callback: impl FnOnce()) -> io::Result<()> {
         let had_events = self.event_stream.is_some();
         self.inner.suspend_events(&mut self.event_stream);
+        if cfg!(windows) {
+            self.input_frames
+                .lock()
+                .unwrap()
+                .observe_ordered_geometry(None);
+        }
         self.inner.suspend()?;
         self.presentation.invalidate();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
         let resumed = self.inner.resume().and_then(|()| {
             if had_events && self.event_stream.is_none() {
-                self.event_stream = Some(self.inner.event_stream()?);
+                self.open_event_stream()?;
             }
             Ok(())
         });
@@ -1217,6 +1223,17 @@ impl<'a> Terminal<'a> {
                     if resized {
                         self.inner.invalidate_geometry();
                     }
+                    if cfg!(windows) {
+                        if let TerminalEvent::Resize(width, height) = event {
+                            // A console resize record is ordered with key
+                            // records, even when painting already saw the
+                            // physical resize through a size query.
+                            self.input_frames
+                                .lock()
+                                .unwrap()
+                                .observe_ordered_geometry(Some((width, height)));
+                        }
+                    }
                     if !self.ignore_ctrl_c {
                         if let TerminalEvent::Key(KeyEvent {
                             code: KeyCode::Char('c'),
@@ -1273,7 +1290,7 @@ impl<'a> Terminal<'a> {
 
     pub fn events(&mut self) -> io::Result<TerminalEvents> {
         if self.event_stream.is_none() {
-            self.event_stream = Some(self.inner.event_stream()?);
+            self.open_event_stream()?;
         }
         let inner = Arc::new(Mutex::new(TerminalEventsInner {
             pending: VecDeque::new(),
@@ -1284,6 +1301,17 @@ impl<'a> Terminal<'a> {
             inner,
             input_frames: self.input_frames.clone(),
         })
+    }
+
+    fn open_event_stream(&mut self) -> io::Result<()> {
+        self.event_stream = Some(self.inner.event_stream()?);
+        if cfg!(windows) {
+            self.input_frames
+                .lock()
+                .unwrap()
+                .observe_ordered_geometry(self.inner.size());
+        }
+        Ok(())
     }
 }
 

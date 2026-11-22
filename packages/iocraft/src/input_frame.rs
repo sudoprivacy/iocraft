@@ -15,6 +15,13 @@ struct FrameControl {
     enabled: Arc<AtomicBool>,
 }
 
+/// The most recent geometry in the ordered native input stream and the
+/// last frame presented while that geometry was current in the stream.
+struct OrderedGeometry {
+    size: (u16, u16),
+    frame: Option<u64>,
+}
+
 #[derive(Default)]
 pub(crate) struct InputFrameState {
     rendering: u64,
@@ -24,6 +31,7 @@ pub(crate) struct InputFrameState {
     observed: Option<InputObservation>,
     rendering_controls: Vec<FrameControl>,
     allow_unknown_size: bool,
+    ordered_geometry: Option<OrderedGeometry>,
 }
 
 #[derive(Clone, Copy)]
@@ -45,6 +53,11 @@ impl InputFrameState {
         }
         self.presented = Some(self.rendering);
         self.presented_size = self.rendering_size;
+        if let Some(geometry) = &mut self.ordered_geometry {
+            if Some(geometry.size) == self.presented_size {
+                geometry.frame = self.presented;
+            }
+        }
     }
 
     pub fn mock() -> Self {
@@ -54,13 +67,36 @@ impl InputFrameState {
         }
     }
 
+    pub fn observe_ordered_geometry(&mut self, size: Option<(u16, u16)>) {
+        if self.ordered_geometry.as_ref().map(|geometry| geometry.size) == size {
+            return;
+        }
+        self.ordered_geometry = size.map(|size| OrderedGeometry {
+            size,
+            frame: if Some(size) == self.presented_size {
+                self.presented
+            } else {
+                None
+            },
+        });
+    }
+
     pub fn sample(&self, size: Option<(u16, u16)>) -> InputObservation {
+        // Physical geometry can move ahead of the Windows console input
+        // queue. Do not attach an older event to a newly painted owner just
+        // because the viewport already returned to its current dimensions.
+        let revision = if size.is_none() && !self.allow_unknown_size {
+            None
+        } else {
+            self.ordered_geometry
+                .as_ref()
+                .filter(|geometry| Some(geometry.size) != size)
+                .map_or(self.presented, |geometry| geometry.frame)
+        };
         InputObservation {
             size,
-            revision: (size.is_some() || self.allow_unknown_size)
-                .then_some(self.presented)
-                .flatten(),
-            deferred: self.presented_size != size,
+            revision,
+            deferred: self.presented_size != size || revision != self.presented,
         }
     }
 
