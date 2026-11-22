@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5](https://github.com/sudoprivacy/iocraft/compare/iocraft-macros-v0.2.4...iocraft-macros-v0.2.5) - 2026-11-22
+
+### Other
+
+- update Cargo.toml dependencies
+
 ## [0.2.4](https://github.com/ccbrown/iocraft/compare/iocraft-macros-v0.2.3...iocraft-macros-v0.2.4) - 2026-04-18
 
 ### Fixed
