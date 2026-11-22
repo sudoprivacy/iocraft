@@ -85,13 +85,16 @@ impl InputFrameState {
         // Physical geometry can move ahead of the Windows console input
         // queue. Do not attach an older event to a newly painted owner just
         // because the viewport already returned to its current dimensions.
+        // Classic consoles can report a buffer size that never matches the
+        // viewport. Only use an ordered size backed by a presented frame.
         let revision = if size.is_none() && !self.allow_unknown_size {
             None
         } else {
             self.ordered_geometry
                 .as_ref()
                 .filter(|geometry| Some(geometry.size) != size)
-                .map_or(self.presented, |geometry| geometry.frame)
+                .and_then(|geometry| geometry.frame)
+                .or(self.presented)
         };
         InputObservation {
             size,
@@ -355,6 +358,19 @@ mod tests {
         assert!(!large.is_current());
         observe(&state, LARGE);
         assert!(large.is_current());
+    }
+
+    #[test]
+    fn console_buffer_size_without_a_viewport_frame_keeps_input_usable() {
+        let state = Arc::<Mutex<InputFrameState>>::default();
+        let frame = InputFrame::begin(state.clone(), LARGE);
+        {
+            let mut state = state.lock().unwrap();
+            state.present();
+            state.observe_ordered_geometry(Some((100, 300)));
+        }
+        observe(&state, LARGE);
+        assert!(frame.is_current());
     }
 
     #[test]

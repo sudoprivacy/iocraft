@@ -8,27 +8,22 @@ const { Terminal } = fromHost('@xterm/headless');
 const pty = fromHost('node-pty');
 const [fixture, mode, scenario] = process.argv.slice(2);
 const queueScenario = scenario === 'resize-queued-paste' || scenario === 'resize-queued-visible-paste';
-assert(fixture && ['bundled', 'system'].includes(mode) && (queueScenario || ['clear', 'paste', 'middle-paste', 'clear-paste', 'navigation', 'rendered-cursor', 'resize-boundary', 'resize-restore-boundary', 'resize-narrow-burst', 'resize-narrow-paste-burst', 'resize-narrow-paste-ack', 'resize-pending-burst', 'resize-pending-restore', 'resize-visible-burst', 'resize-pending-visible'].includes(scenario)));
+assert(fixture && ['bundled', 'system'].includes(mode) && (queueScenario || ['clear', 'paste', 'middle-paste', 'clear-paste', 'navigation', 'rendered-cursor', 'resize-boundary', 'resize-restore-boundary', 'resize-narrow-burst', 'resize-pending-burst', 'resize-pending-restore', 'resize-visible-burst', 'resize-pending-visible'].includes(scenario)));
 const terminal = new Terminal({ cols: 100, rows: 30, scrollback: 1000, allowProposedApi: true,
   ...(process.platform === 'win32' ? { reflowCursorLine: mode !== 'system',
     windowsPty: { backend: 'conpty', buildNumber: Number(os.release().split('.')[2]) } } : {}) });
 const env = { ...process.env, TERM: 'xterm-256color' };
 delete env.ELECTRON_RUN_AS_NODE;
 delete env.NO_COLOR;
-const queueGate = queueScenario ? process.env.IOCRAFT_INPUT_QUEUE_DIAGNOSTIC : undefined;
-assert(!queueScenario || (process.platform === 'win32' && queueGate));
+const queueGate = queueScenario ? process.env.IOCRAFT_INPUT_QUEUE_GATE : undefined;
+assert(!queueScenario || (process.platform === 'win32' && queueGate && env.IOCRAFT_INPUT_EVENT_TRACE));
 if (queueGate) fs.mkdirSync(queueGate);
-else delete env.IOCRAFT_INPUT_QUEUE_DIAGNOSTIC;
+else delete env.IOCRAFT_INPUT_QUEUE_GATE;
 const child = pty.spawn(path.resolve(fixture), [], { cols: 100, rows: 30,
   cwd: path.dirname(path.resolve(fixture)), env, useConpty: true, useConptyDll: mode === 'bundled' });
 let pending = 0, lastData = Date.now(), exited = false, exitCode;
 const visibleScenario = scenario === 'resize-visible-burst' || scenario === 'resize-pending-visible';
 const pausedScenario = scenario === 'resize-pending-burst' || scenario === 'resize-pending-restore' || scenario === 'resize-pending-visible';
-const pasteScenario = scenario === 'resize-narrow-paste-burst' || scenario === 'resize-narrow-paste-ack';
-function traceDriver(action) {
-  if (process.env.IOCRAFT_WIRE_TRACE)
-    fs.appendFileSync(process.env.IOCRAFT_WIRE_TRACE, JSON.stringify({ time: Date.now(), action }) + '\n');
-}
 let paused = false;
 function ownedIdentity() {
   const stat = fs.readFileSync(`/proc/${child.pid}/stat`, 'utf8');
@@ -91,22 +86,25 @@ async function waitFor(text, settled = true) {
   }
   throw new Error(`missing ${text}\n${screen()}`);
 }
-async function waitForGate(marker, expectedSize) {
+async function waitForQueuedPaste(expectedSize) {
+  const queuedFile = path.join(queueGate, 'queued');
   const until = Date.now() + 15000;
   while (Date.now() < until) {
-    const file = path.join(queueGate, marker);
-    if (fs.existsSync(file)) {
-      const body = fs.readFileSync(file, 'utf8');
+    if (fs.existsSync(queuedFile)) {
+      const body = fs.readFileSync(queuedFile, 'utf8');
       if (/^\d+x\d+ \d+$/.test(body)) {
-        assert(body.startsWith(expectedSize + ' '), `${marker}: ${body}`);
-        traceDriver(`${marker}: ${body}`);
+        assert.equal(body.split(' ')[0], expectedSize, 'size when the native paste was queued');
         return;
       }
     }
-    assert(!exited, `fixture exited before ${marker}`);
+    assert(!exited, 'fixture exited before queueing the paste');
     await sleep(20);
   }
-  throw new Error(`no native queue observation for ${marker}\n${screen()}`);
+  throw new Error(`no native queue observation\n${screen()}`);
+}
+function assertDraft(expected, message) {
+  const drafts = [...viewport().matchAll(/InputValue:([^:\r\n]*):EndValue/g)];
+  assert.equal(drafts.at(-1)?.[1], expected, `${message}\n${screen()}`);
 }
 async function stop() {
   if (!exited) child.write('\x1b');
@@ -121,7 +119,7 @@ async function stop() {
 (async () => {
   try {
     await waitFor('InputValue::EndValue');
-    const narrowBurst = scenario === 'resize-narrow-burst' || pasteScenario || pausedScenario || visibleScenario || queueScenario;
+    const narrowBurst = scenario === 'resize-narrow-burst' || pausedScenario || visibleScenario || queueScenario;
     const seed = narrowBurst ? 'DraftHeadTail' : 'Seed';
     child.write(seed);
     await waitFor(`InputValue:${seed}:EndValue`, !narrowBurst);
@@ -141,21 +139,21 @@ async function stop() {
       child.resize(width, height);
       await waitFor(visible ? `Viewport:${size}:reviewable` : 'Focus:off');
       child.write('\x1b[17~');
-      await waitForGate('queued', size);
-      traceDriver('restore-after-native-paste-queued');
+      await waitForQueuedPaste(size);
       terminal.resize(100, 30);
       child.resize(100, 30);
       fs.writeFileSync(path.join(queueGate, 'release'), '');
       child.write('\x1b[17~');
       await waitFor('BatchAck:2');
-      const observed = fs.readFileSync(process.env.IOCRAFT_INPUT_EVENT_TRACE, 'utf8');
-      assert(observed.includes('event=Paste("QueuedPaste")'), 'the queued paste must reach the callback');
+      const observed = fs.readFileSync(env.IOCRAFT_INPUT_EVENT_TRACE, 'utf8');
+      assert(observed.includes('callback=100x30 physical=Some((100, 30)) event=Paste("QueuedPaste")'),
+        'the queued paste must reach the restored callback');
       const expected = visible ? 'Draft[QueuedPaste]HeadTail' : seed;
-      assert(viewport().includes(`InputValue:${expected}:EndValue`), `${mode}: queued paste admitted to wrong frame\n${screen()}`);
+      assertDraft(expected, `${mode}: queued paste admitted to wrong frame`);
       if (!visible) {
         child.write('\x1b[200~Kept\x1b[201~\x1b[17~');
         await waitFor('BatchAck:3');
-        assert(viewport().includes('InputValue:Draft[Kept]HeadTail:EndValue'), 'fresh paste must preserve middle cursor');
+        assertDraft('Draft[Kept]HeadTail', 'fresh paste must preserve middle cursor');
       }
       console.log(JSON.stringify({ mode, scenario, result: 'PASS' }));
       await stop();
@@ -193,7 +191,6 @@ async function stop() {
       }
       terminal.resize(width, 8);
       child.resize(width, 8);
-      traceDriver('shrink');
       if (scenario === 'resize-restore-boundary') await waitFor('Viewport:30x8:blocked');
       if (scenario === 'resize-pending-restore') {
         await waitFor('Focus:off');
@@ -201,27 +198,22 @@ async function stop() {
       }
       // F6 acknowledges delivery. For the restore case do not wait between
       // hidden input and growth: those pre-resize keys still own the old frame.
-      child.write(pasteScenario
-        ? '\x1b[200~MustNotAppear\x1b[201~' + (scenario === 'resize-narrow-paste-ack' ? '\x1b[17~' : '')
-        : 'MustNotAppear' + (pausedScenario
-          ? '\x1b[200~HiddenPaste\x1b[201~\r'
-          : narrow ? '' : '\r\x1b[17~'));
-      traceDriver('sent-hidden-burst');
+      child.write('MustNotAppear' + (pausedScenario
+        ? '\x1b[200~HiddenPaste\x1b[201~\r'
+        : narrow ? '' : '\r\x1b[17~'));
       if (scenario === 'resize-pending-burst') resumeOwned();
       if (narrow && scenario !== 'resize-pending-restore') await waitFor('Focus:off');
-      if (scenario === 'resize-narrow-paste-ack') await waitFor('BatchAck:1');
       if (scenario === 'resize-boundary') {
         await waitFor('Viewport:30x8:blocked');
         await waitFor('BatchAck:1');
       }
       terminal.resize(100, 30);
       child.resize(100, 30);
-      traceDriver('grow');
       resumeOwned();
       // A restored size marker may also exist in scrollback from startup.
       // Require a fresh, non-editing acknowledgment in the actual viewport;
       // the critical resize/input burst above remains unsynchronized.
-      const restoredAck = narrow && scenario !== 'resize-narrow-paste-ack' ? 1 : 2;
+      const restoredAck = narrow ? 1 : 2;
       child.write('\x1b[17~');
       await waitFor('Viewport:100x30:reviewable');
       await waitFor(`BatchAck:${restoredAck}`);

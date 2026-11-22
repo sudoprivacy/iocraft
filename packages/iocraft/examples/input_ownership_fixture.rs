@@ -5,7 +5,7 @@ use iocraft::prelude::*;
 // The native queue gets the same VT records as a bracketed paste. Writing
 // them directly separates the application's scheduling from pipe backpressure.
 #[cfg(windows)]
-fn observe_pending_paste_before_restore() {
+fn queue_paste_before_restore() {
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
     use windows_sys::Win32::System::Console::{
@@ -13,7 +13,7 @@ fn observe_pending_paste_before_restore() {
         KEY_EVENT_RECORD, KEY_EVENT_RECORD_0, STD_INPUT_HANDLE,
     };
 
-    let Some(gate) = std::env::var_os("IOCRAFT_INPUT_QUEUE_DIAGNOSTIC").map(PathBuf::from) else {
+    let Some(gate) = std::env::var_os("IOCRAFT_INPUT_QUEUE_GATE").map(PathBuf::from) else {
         return;
     };
     let size = crossterm::terminal::size().unwrap();
@@ -67,7 +67,7 @@ fn observe_pending_paste_before_restore() {
 }
 
 #[cfg(not(windows))]
-fn observe_pending_paste_before_restore() {}
+fn queue_paste_before_restore() {}
 
 fn trace_input_event(event: &TerminalEvent, width: u16, height: u16) {
     let Ok(path) = std::env::var("IOCRAFT_INPUT_EVENT_TRACE") else {
@@ -83,10 +83,7 @@ fn trace_input_event(event: &TerminalEvent, width: u16, height: u16) {
         let physical = crossterm::terminal::size().ok();
         let _ = writeln!(
             log,
-            "time={:?} callback={width}x{height} physical={physical:?} event={event:?}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_millis())
+            "callback={width}x{height} physical={physical:?} event={event:?}"
         );
     }
 }
@@ -123,7 +120,7 @@ fn Fixture(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     });
     if acknowledgment.get() == 1 && !*observed_queue.read() {
         *observed_queue.write() = true;
-        observe_pending_paste_before_restore();
+        queue_paste_before_restore();
     }
     if exit.get() {
         system.exit();
