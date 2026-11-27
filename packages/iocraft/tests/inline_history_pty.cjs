@@ -107,9 +107,36 @@ async function settle(marker, width, notBefore = 0, afterFrame = -1) {
   }
   throw new Error(`timed out waiting for ${marker}\n${snapshot()}`);
 }
+// Blank rows between history and the live frame's first row (its prose, or
+// else its status). The frame follows history directly; a resize must never
+// change this edge, which belongs to the application's own layout.
+function historyEdge() {
+  const buffer = terminal.buffer.active;
+  const line = row => buffer.getLine(row).translateToString(true);
+  let top = -1;
+  for (let row = buffer.length - 1; row >= 0; row--) if (line(row).includes('StatusMarker')) { top = row; break; }
+  assert(top >= 0, 'no live frame');
+  while (top > 0 && /^Prose\w+ ordinary words$/.test(line(top - 1))) top--;
+  let blank = 0;
+  while (top - blank - 1 >= 0 && line(top - blank - 1).trim() === '') blank++;
+  return blank;
+}
+// Rows the terminal itself scrolled away before the application could redraw
+// cannot be recalled. See the bounded-tiny scenario for the accepted case:
+// those rows stay in scrollback, and the screen holds exactly one frame.
+let staleLiveRowsInScrollback = false;
 function check(label, phase, committed) {
   const text = snapshot();
+  const buffer = terminal.buffer.active;
+  const screen = Array.from({ length: terminal.rows },
+    (_, row) => buffer.getLine(buffer.baseY + row)?.translateToString(true) ?? '').join('\n');
   for (const marker of ['ShellHistoryBeforeScode', 'StatusMarker', 'TodoMarker', 'FooterMarker', 'DraftSurvives']) {
+    const live = marker !== 'ShellHistoryBeforeScode';
+    if (live && staleLiveRowsInScrollback) {
+      assert.equal(screen.split(marker).length - 1, 1,
+        `${label}: ${marker} on screen\nresize geometry: ${JSON.stringify(lastResize)}\n${text}`);
+      continue;
+    }
     assert.equal(text.split(marker).length - 1, 1,
       `${label}: ${marker}\nresize geometry: ${JSON.stringify(lastResize)}\n${text}`);
   }
@@ -229,6 +256,9 @@ function check(label, phase, committed) {
         lastResize.afterRedraw = geometry('after acknowledged redraw');
       }
       const matrix = [[100,40], [240,40], [60,40], [240,40], [60,18], [240,40]];
+      const edge = historyEdge();
+      const checkEdge = label => assert.equal(historyEdge(), edge,
+        `${label}: the history edge changed from ${edge} blank rows\nresize geometry: ${JSON.stringify(lastResize)}\n${snapshot()}`);
       if (resize === 'rapid' || resize === 'interleaved') {
         const interval = Number(process.env.IOCRAFT_RESIZE_INTERVAL_MS || 5);
         assert(Number.isFinite(interval) && interval >= 0, 'invalid resize interval');
@@ -242,6 +272,7 @@ function check(label, phase, committed) {
         }
         await acknowledge(240, 40);
         check('rapid resize', 5, committed);
+        checkEdge('rapid resize');
       }
       // A subsequent slow round trip also detects latent corruption left by
       // a rapid round trip whose final dimensions matched its initial ones.
@@ -249,7 +280,18 @@ function check(label, phase, committed) {
         : resize === 'bounded-tiny' ? [[60,40], [40,12], [120,40], [48,40], [240,40]] : matrix) {
         resizeTo(cols, rows);
         await acknowledge(cols, rows);
+        // Accepted: after growing from 12 rows, the frame sits high on a
+        // scrolled screen. Narrowing to 48 columns re-wraps rows below it, and
+        // the terminal scrolls its viewport by those rows before the redraw,
+        // so the frame's first rows can be left in scrollback. Moving the
+        // frame to the screen bottom would prevent it, but would leave blank
+        // rows between history and the frame after every growth.
+        if (resize === 'bounded-tiny' && cols === 48) {
+          staleLiveRowsInScrollback = lastResize.afterFrontend.statusRowsInScrollback.length > 0;
+        }
         check(`resize ${cols}x${rows}`, 5, committed);
+        // Stranded frame rows then sit between history and the redraw.
+        if (!staleLiveRowsInScrollback) checkEdge(`resize ${cols}x${rows}`);
       }
     }
     else if (resize) assert.fail(`scenario ${resize} has no acceptance workflow`);

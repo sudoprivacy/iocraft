@@ -183,9 +183,6 @@ trait TerminalImpl: Write + Send {
         Ok(())
     }
     fn set_history_blank_anchor(&mut self, _available: bool) {}
-    fn prepare_history(&mut self, _next_height: usize, _can_relocate: bool) -> io::Result<()> {
-        Ok(())
-    }
     fn clear_canvas(&mut self) -> io::Result<()>;
     fn write_canvas(&mut self, prev: Option<&Canvas>, canvas: &Canvas) -> io::Result<()>;
     fn event_stream(&mut self) -> io::Result<BoxStream<'static, io::Result<TerminalEvent>>>;
@@ -258,7 +255,6 @@ struct StdTerminal<'a> {
     inline_anchor: InlineAnchor,
     inline_saved_start: Option<u16>,
     history_blank_anchor: bool,
-    inline_reanchor_row: Option<u16>,
     resize_pending: bool,
     resize_cursor: Option<(u16, u16)>,
     size: Option<(u16, u16)>,
@@ -294,7 +290,6 @@ impl TerminalImpl for StdTerminal<'_> {
         self.inline_anchored = false;
         self.inline_anchor = InlineAnchor::Tail;
         self.history_blank_anchor = false;
-        self.inline_reanchor_row = None;
         self.resize_cursor = None;
         self.set_raw_mode_enabled(false)?;
         self.dest.execute(cursor::Show)?;
@@ -427,13 +422,20 @@ impl TerminalImpl for StdTerminal<'_> {
                             // the row below the verified history blank there.
                             self.dest.write_all(b"\r\n")?;
                         }
-                        self.inline_reanchor_row = Some(self.size.map_or(top, |(_, height)| {
-                            top.saturating_add(offset).min(height.saturating_sub(1))
-                        }));
                     } else {
-                        // The starting row cannot be proved addressable.
-                        // Preserve caller history rather than guessing.
-                        self.retain_unlocated_inline_frame()?;
+                        // Narrowing re-wrapped more rows than the screen held
+                        // above the anchor, and the terminal scrolled the
+                        // frame's first rows into scrollback before this
+                        // redraw. Terminals report the anchor no higher than
+                        // it is when rows re-wrap, so the frame starts above
+                        // the screen: every visible row down to the anchor is
+                        // part of it, and history lies wholly above. Redraw
+                        // from the top of the screen; scrollback is final.
+                        // History's blank boundary, if any, went with it.
+                        self.history_blank_anchor = false;
+                        self.dest
+                            .queue(cursor::MoveTo(0, 0))?
+                            .queue(terminal::Clear(terminal::ClearType::FromCursorDown))?;
                     }
                 }
                 Some((0, row)) => {
@@ -450,8 +452,6 @@ impl TerminalImpl for StdTerminal<'_> {
                         .queue(terminal::Clear(terminal::ClearType::FromCursorDown))?;
                     if rows > reachable {
                         self.dest.write_all(b"[iocraft] Previous live rows moved into scrollback during resize; history retained.\r\n")?;
-                    } else {
-                        self.inline_reanchor_row = Some(row - reachable as u16);
                     }
                 }
                 _ => {
@@ -498,10 +498,6 @@ impl TerminalImpl for StdTerminal<'_> {
 
     fn set_history_blank_anchor(&mut self, available: bool) {
         self.history_blank_anchor = available;
-    }
-
-    fn prepare_history(&mut self, next_height: usize, can_relocate: bool) -> io::Result<()> {
-        self.reanchor_inline(next_height, can_relocate)
     }
 
     fn clear_canvas(&mut self) -> io::Result<()> {
@@ -563,8 +559,6 @@ impl TerminalImpl for StdTerminal<'_> {
             if self.fullscreen {
                 self.prev_canvas_top_row = 0;
                 self.dest.queue(cursor::MoveTo(0, 0))?;
-            } else {
-                self.reanchor_inline(canvas.height(), true)?;
             }
             self.prev_canvas_height = canvas.height() as _;
             self.prev_size_on_write = self.size;
@@ -785,24 +779,6 @@ impl<'a> StdTerminal<'a> {
         Ok(())
     }
 
-    fn reanchor_inline(&mut self, height: usize, can_relocate: bool) -> io::Result<()> {
-        if let Some(top) = self.inline_reanchor_row.take() {
-            // Place the complete history/live transaction before history
-            // advances the cursor. Never relocate an unfinished history line.
-            if can_relocate {
-                let bottom_top = self
-                    .size
-                    .map_or(0, |(_, rows)| usize::from(rows).saturating_sub(height + 1));
-                if bottom_top > usize::from(top) {
-                    self.dest.queue(cursor::MoveToNextLine(
-                        (bottom_top - usize::from(top)) as u16,
-                    ))?;
-                }
-            }
-        }
-        Ok(())
-    }
-
     fn retain_unlocated_inline_frame(&mut self) -> io::Result<()> {
         self.history_blank_anchor = false;
         for _ in 0..self.size.map_or(1, |(_, height)| height) {
@@ -840,7 +816,6 @@ impl<'a> StdTerminal<'a> {
             inline_anchor: InlineAnchor::Tail,
             inline_saved_start: None,
             history_blank_anchor: false,
-            inline_reanchor_row: None,
             resize_pending: false,
             resize_cursor: None,
         };
@@ -1802,7 +1777,6 @@ mod tests {
             inline_anchor: InlineAnchor::Tail,
             inline_saved_start: None,
             history_blank_anchor: false,
-            inline_reanchor_row: None,
             resize_pending: false,
             resize_cursor: None,
         }
@@ -1834,7 +1808,6 @@ mod tests {
             inline_anchor: InlineAnchor::Tail,
             inline_saved_start: None,
             history_blank_anchor: false,
-            inline_reanchor_row: None,
             resize_pending: false,
             resize_cursor: None,
         }
